@@ -214,5 +214,9 @@ def token_error_message(exc: Exception) -> str:
 def token_status_caption(access_token: str) -> str:
     expiry = next_expiry_ist()
     if not (access_token or "").strip():
-        return f"No token yet. After login, valid until {expiry.strftime('%I:%M %p IST')}."
-    return f"Token active until {expiry.strftime('%d %b, %I:%M %p IST')} (daily reset at 6 AM IST)."
+        return f"Not connected · log in to sync live holdings until {expiry.strftime('%I:%M %p IST')}."
+    return f"Live until {expiry.strftime('%d %b, %I:%M %p IST')} · resets daily at 6 AM IST."
+
+
+def has_active_token(access_token: str) -> bool:
+    return bool((access_token or "").strip())
