@@ -51,6 +51,37 @@ class TerminalMetrics:
     enterprise_to_ebitda: float | None = None
 
 
+@dataclass
+class TechnicalMetrics:
+    symbol: str
+    yahoo_ticker: str | None = None
+    last_close: float | None = None
+    rsi_14: float | None = None
+    sma_50: float | None = None
+    momentum_20d_pct: float | None = None
+    price_vs_sma50_pct: float | None = None
+    source: str | None = None
+    error: str | None = None
+
+
+# Asset types that typically lack reliable equity OHLC on OpenBB/Yahoo.
+NON_EQUITY_ASSET_TYPES = frozenset(
+    {
+        "gold",
+        "sgb",
+        "cash",
+        "mutual_fund",
+        "mf",
+        "debt",
+        "bond",
+        "fd",
+        "fixed_deposit",
+        "commodity",
+        "crypto",
+    }
+)
+
+
 def is_available() -> bool:
     return OPENBB_AVAILABLE
 
@@ -164,6 +195,173 @@ def fetch_news_headlines(symbol: str, limit: int = 3) -> list[str]:
         return headlines
     except Exception:
         return []
+
+
+def _rsi_wilder(close: pd.Series, period: int = 14) -> float | None:
+    if close is None or len(close) < period + 1:
+        return None
+    delta = close.diff()
+    gain = delta.clip(lower=0.0)
+    loss = (-delta).clip(lower=0.0)
+    avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    last_gain = float(avg_gain.iloc[-1])
+    last_loss = float(avg_loss.iloc[-1])
+    if last_loss == 0:
+        return 100.0 if last_gain > 0 else 50.0
+    rs = last_gain / last_loss
+    return round(100.0 - (100.0 / (1.0 + rs)), 2)
+
+
+def _close_series_from_openbb(yahoo: str, lookback_days: int = 120) -> pd.Series | None:
+    """Pull daily closes via OpenBB equity.price.historical (yfinance provider)."""
+    if not OPENBB_AVAILABLE or _obb is None:
+        return None
+    try:
+        end = pd.Timestamp.today().normalize()
+        start = end - pd.Timedelta(days=lookback_days + 10)
+        out = _obb.equity.price.historical(
+            yahoo,
+            start_date=start.strftime("%Y-%m-%d"),
+            end_date=end.strftime("%Y-%m-%d"),
+            provider="yfinance",
+        )
+        df = out.to_dataframe() if hasattr(out, "to_dataframe") else None
+        if df is None or df.empty:
+            if getattr(out, "results", None):
+                df = pd.DataFrame([r.model_dump() if hasattr(r, "model_dump") else vars(r) for r in out.results])
+            else:
+                return None
+        # Normalize column names across OpenBB versions
+        colmap = {c.lower(): c for c in df.columns}
+        close_col = colmap.get("close") or colmap.get("adj_close") or colmap.get("adj close")
+        if not close_col:
+            return None
+        close = pd.to_numeric(df[close_col], errors="coerce").dropna()
+        return close if len(close) >= 15 else None
+    except Exception:
+        return None
+
+
+def _close_series_from_yahoo(yahoo: str, lookback_days: int = 120) -> pd.Series | None:
+    """Fallback OHLCV via existing Yahoo helper."""
+    try:
+        df = san.fetch_price_data(yahoo, days=lookback_days)
+        if df is None or df.empty or "Close" not in df.columns:
+            return None
+        close = pd.to_numeric(df["Close"], errors="coerce").dropna()
+        return close if len(close) >= 15 else None
+    except Exception:
+        return None
+
+
+def _metrics_from_close(symbol: str, yahoo: str, close: pd.Series, source: str) -> TechnicalMetrics:
+    last_close = _safe_float(close.iloc[-1])
+    rsi = _rsi_wilder(close, 14)
+    sma_50 = round(float(close.tail(50).mean()), 2) if len(close) >= 50 else (
+        round(float(close.mean()), 2) if len(close) >= 20 else None
+    )
+    momentum = None
+    if len(close) >= 21 and float(close.iloc[-21]) != 0:
+        momentum = round((float(close.iloc[-1]) / float(close.iloc[-21]) - 1.0) * 100.0, 2)
+    vs_sma = None
+    if last_close is not None and sma_50:
+        vs_sma = round((last_close / sma_50 - 1.0) * 100.0, 2)
+    return TechnicalMetrics(
+        symbol=symbol,
+        yahoo_ticker=yahoo,
+        last_close=round(last_close, 2) if last_close is not None else None,
+        rsi_14=rsi,
+        sma_50=sma_50,
+        momentum_20d_pct=momentum,
+        price_vs_sma50_pct=vs_sma,
+        source=source,
+    )
+
+
+def is_enrichable_asset(asset_type: str | None) -> bool:
+    """Return False for non-standard assets that should skip market enrichment."""
+    if not asset_type:
+        return True
+    key = str(asset_type).strip().lower().replace(" ", "_").replace("-", "_")
+    return key not in NON_EQUITY_ASSET_TYPES and "mutual" not in key and "fund" not in key
+
+
+def fetch_technicals(symbol: str, asset_type: str | None = None) -> TechnicalMetrics:
+    """
+    Fetch RSI-14, SMA-50, and 20d momentum for a symbol.
+    Prefers OpenBB historicals; falls back to Yahoo. Never raises.
+    """
+    if not is_enrichable_asset(asset_type):
+        return TechnicalMetrics(
+            symbol=symbol,
+            error=f"skipped non-equity asset_type={asset_type}",
+        )
+
+    try:
+        yahoo = _yahoo_symbol(symbol)
+    except Exception as exc:
+        return TechnicalMetrics(symbol=symbol, error=f"ticker resolve failed: {exc}")
+
+    close = _close_series_from_openbb(yahoo)
+    source = "openbb"
+    if close is None:
+        close = _close_series_from_yahoo(yahoo)
+        source = "yahoo"
+    if close is None:
+        return TechnicalMetrics(
+            symbol=symbol,
+            yahoo_ticker=yahoo,
+            error="no price history",
+        )
+    try:
+        return _metrics_from_close(symbol, yahoo, close, source)
+    except Exception as exc:
+        return TechnicalMetrics(symbol=symbol, yahoo_ticker=yahoo, error=str(exc)[:160])
+
+
+@st.cache_data(ttl="2h", show_spinner=False)
+def enrich_symbols_technicals(
+    symbols: tuple[str, ...],
+    asset_types: tuple[str | None, ...] = (),
+) -> dict:
+    """
+    Batch-enrich unique symbols with technical metrics.
+    Returns {available, metrics: list[dict], warnings: list[str]}.
+    """
+    warnings: list[str] = []
+    if not symbols:
+        return {"available": False, "metrics": [], "warnings": ["No symbols to enrich."]}
+
+    type_map: dict[str, str | None] = {}
+    if asset_types and len(asset_types) == len(symbols):
+        type_map = dict(zip(symbols, asset_types))
+
+    metrics: list[dict] = []
+    workers = min(6, max(1, len(symbols)))
+
+    def _one(sym: str) -> TechnicalMetrics:
+        return fetch_technicals(sym, type_map.get(sym))
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        rows = list(pool.map(_one, symbols))
+
+    for row in rows:
+        payload = asdict(row)
+        metrics.append(payload)
+        if row.error:
+            warnings.append(f"{row.symbol}: {row.error}")
+
+    ok = sum(1 for m in metrics if m.get("rsi_14") is not None or m.get("sma_50") is not None)
+    if ok == 0 and not OPENBB_AVAILABLE:
+        warnings.append(unavailability_reason() or "OpenBB unavailable; Yahoo fallback also failed.")
+
+    return {
+        "available": ok > 0,
+        "metrics": metrics,
+        "warnings": warnings,
+        "coverage": {"ok": ok, "total": len(symbols)},
+    }
 
 
 @st.cache_data(ttl="4h", show_spinner=False)

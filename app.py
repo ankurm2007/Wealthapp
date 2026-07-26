@@ -49,6 +49,8 @@ if "ai_portfolio_briefing" not in st.session_state:
     st.session_state.ai_portfolio_briefing = None
 if "ai_holding_research" not in st.session_state:
     st.session_state.ai_holding_research = None
+if "ai_engine_analysis" not in st.session_state:
+    st.session_state.ai_engine_analysis = None
 if "risk_snapshot" not in st.session_state:
     st.session_state.risk_snapshot = None
 if "fmp_forensic_snapshot" not in st.session_state:
@@ -346,6 +348,54 @@ def wealth_trend_series(column: str = "total_current", points: int = 12) -> list
     return values if len(values) >= 3 else None
 
 
+def render_portfolio_ai_engine(portfolio_df: pd.DataFrame) -> None:
+    """Interactive trigger for the modular Portfolio Analysis Engine."""
+    pui.section(
+        "AI portfolio engine",
+        "OpenBB technicals + Groq/Gemini quantitative memo",
+        icon="psychology",
+    )
+    keys = resolve_agent_api_keys()
+    openai_key = get_secret("openai.api_key")
+    has_ai = bool(keys.get("gemini") or keys.get("xai") or keys.get("groq") or openai_key)
+
+    st.caption(
+        "Dynamically reads your active holdings (no hardcoded tickers), "
+        "enriches with RSI-14 / SMA-50 / 20d momentum, then asks the LLM for three structured sections."
+    )
+
+    if not has_ai:
+        st.info(
+            "Add `GROQ_API_KEY` / `GEMINI_API_KEY` (or `[groq]` / `[gemini]` in secrets) "
+            "to run the analysis engine."
+        )
+        return
+
+    run = st.button(
+        "Analyze current portfolio",
+        type="primary",
+        icon=":material/auto_awesome:",
+        width="stretch",
+        key="run_portfolio_ai_engine",
+    )
+    if run:
+        with st.spinner("Enriching holdings and generating quantitative analysis..."):
+            result = pai.analyze_portfolio_engine(
+                portfolio_df,
+                gemini_key=keys.get("gemini") or "",
+                groq_key=keys.get("groq") or "",
+                xai_key=keys.get("xai") or "",
+                openai_key=openai_key or "",
+            )
+        st.session_state.ai_engine_analysis = result
+
+    if st.session_state.ai_engine_analysis:
+        paidisp.render_engine_analysis(
+            st.session_state.ai_engine_analysis,
+            show_payload=True,
+        )
+
+
 def render_portfolio_tab(portfolio_df: pd.DataFrame, summary: dict) -> None:
     if portfolio_df.empty:
         return
@@ -396,6 +446,8 @@ def render_portfolio_tab(portfolio_df: pd.DataFrame, summary: dict) -> None:
             }
         )
     pui.kpi_row(cards)
+
+    render_portfolio_ai_engine(portfolio_df)
 
     pui.section("Platform breakdown", "Invested vs current by broker", icon="pie_chart")
     platforms = list(portfolio_df["Owner"].unique())

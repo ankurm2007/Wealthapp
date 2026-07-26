@@ -87,3 +87,108 @@ def render_ai_response(text: str, *, show_meta: bool = True) -> None:
 
 def render_chat_assistant(content: str) -> None:
     render_ai_response(content, show_meta=True)
+
+
+ENGINE_SECTION_ORDER = (
+    "Key Portfolio Drivers & Technical Health",
+    "Risk Exposure & Concentration Flags",
+    "Actionable Tactical Recommendations",
+)
+
+
+def _match_engine_section(title: str) -> str | None:
+    lower = title.lower()
+    for canonical in ENGINE_SECTION_ORDER:
+        if canonical.lower() in lower or lower in canonical.lower():
+            return canonical
+    if "driver" in lower or "technical" in lower:
+        return ENGINE_SECTION_ORDER[0]
+    if "risk" in lower or "concentration" in lower:
+        return ENGINE_SECTION_ORDER[1]
+    if "action" in lower or "tactical" in lower or "recommend" in lower:
+        return ENGINE_SECTION_ORDER[2]
+    return None
+
+
+def render_engine_analysis(result: dict, *, show_payload: bool = False) -> None:
+    """Render Portfolio Analysis Engine output as three structured sections."""
+    provider = result.get("provider") or "—"
+    warnings = result.get("warnings") or []
+    coverage = (result.get("technicals") or {}).get("coverage") or {}
+
+    with st.container(horizontal=True):
+        st.metric("Provider", provider, border=True)
+        if coverage:
+            st.metric(
+                "Technicals coverage",
+                f"{coverage.get('ok', 0)}/{coverage.get('total', 0)}",
+                border=True,
+            )
+        portfolio = (result.get("payload") or {}).get("portfolio") or {}
+        if portfolio.get("overall_return_pct") is not None:
+            st.metric(
+                "Portfolio return",
+                f"{portfolio['overall_return_pct']:+.1f}%",
+                border=True,
+            )
+
+    if warnings:
+        with st.expander(
+            f"Data warnings ({len(warnings)})",
+            icon=":material/warning:",
+            expanded=False,
+        ):
+            for w in warnings[:40]:
+                st.caption(w)
+            if len(warnings) > 40:
+                st.caption(f"…and {len(warnings) - 40} more")
+
+    if not result.get("ok") or not result.get("text"):
+        st.warning(
+            "Analysis incomplete — market enrichment and/or LLM call failed. "
+            "Check warnings above and API keys in secrets."
+        )
+        if show_payload and result.get("payload"):
+            with st.expander("Raw analysis payload", expanded=False):
+                st.json(result["payload"])
+        return
+
+    st.caption(f":material/smart_toy: Quantitative portfolio analysis · {provider}")
+
+    sections = split_sections(result["text"])
+    by_key: dict[str, str] = {}
+    extras: list[tuple[str, str]] = []
+    for title, content in sections:
+        key = _match_engine_section(title)
+        if key and key not in by_key:
+            by_key[key] = content
+        else:
+            extras.append((title, content))
+
+    icons = {
+        ENGINE_SECTION_ORDER[0]: "blue",
+        ENGINE_SECTION_ORDER[1]: "red",
+        ENGINE_SECTION_ORDER[2]: "violet",
+    }
+
+    for canonical in ENGINE_SECTION_ORDER:
+        content = by_key.get(canonical)
+        if not content:
+            continue
+        color = icons[canonical]
+        with st.container(border=True):
+            st.markdown(f"**:{color}[{canonical}]**")
+            st.markdown(content)
+
+    # Fallback if the model ignored ## headers
+    if not by_key:
+        with st.container(border=True):
+            st.markdown(result["text"])
+
+    for title, content in extras:
+        with st.expander(title, expanded=False):
+            st.markdown(content)
+
+    if show_payload and result.get("payload"):
+        with st.expander("Analysis payload (JSON)", icon=":material/data_object:", expanded=False):
+            st.json(result["payload"])

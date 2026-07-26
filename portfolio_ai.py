@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from typing import Any
 
 import pandas as pd
@@ -10,6 +12,8 @@ import portfolio_ai_context as paictx
 import portfolio_market_data as pmd
 import portfolio_terminal as pterm
 import stock_analyzer as san
+
+logger = logging.getLogger(__name__)
 
 
 SYSTEM_ANALYST = """You are an Indian equity portfolio analyst. Write like a research dashboard, not a story or essay.
@@ -87,6 +91,35 @@ Question: {question}
 Portfolio data:
 {context}
 {earnings_block}
+"""
+
+
+ENGINE_SYSTEM = """You are a Quantitative Portfolio Analyst for Indian equities and ETFs.
+Use ONLY the JSON payload provided. Do not invent prices, RSI, weights, or tickers.
+If a metric is null or a symbol was skipped, say so briefly — do not guess.
+Educational analysis only; end with one short disclaimer line.
+Write in markdown with exactly these three ## section headers (no others):
+## Key Portfolio Drivers & Technical Health
+## Risk Exposure & Concentration Flags
+## Actionable Tactical Recommendations
+Prefer short bullets and compact markdown tables. Bold symbols, weights %, returns %, and RSI values."""
+
+
+ENGINE_PROMPT = """Analyze this portfolio JSON as a Quantitative Portfolio Analyst.
+
+Return exactly these three sections:
+
+## Key Portfolio Drivers & Technical Health
+What is driving P&L and technical posture (RSI-14, SMA-50, 20d momentum) across enrichable holdings.
+
+## Risk Exposure & Concentration Flags
+Concentration, single-name / sector weight risk, and weak or overbought technicals.
+
+## Actionable Tactical Recommendations
+Concrete TRIM | HOLD | ADD | WATCH ideas with numbers from the payload (weight, RSI, momentum). Max 5 rows.
+
+Portfolio JSON:
+{payload_json}
 """
 
 
@@ -203,7 +236,7 @@ def detect_key_provider(api_key: str) -> str:
     return "unknown"
 
 
-def _call_gemini(prompt: str, api_key: str) -> tuple[str, str]:
+def _call_gemini(prompt: str, api_key: str, system: str = SYSTEM_ANALYST) -> tuple[str, str]:
     import google.generativeai as genai
 
     genai.configure(api_key=api_key)
@@ -212,7 +245,7 @@ def _call_gemini(prompt: str, api_key: str) -> tuple[str, str]:
         try:
             client = genai.GenerativeModel(
                 model,
-                system_instruction=SYSTEM_ANALYST,
+                system_instruction=system,
             )
             response = client.generate_content(prompt)
             text = (response.text or "").strip()
@@ -229,7 +262,12 @@ def _call_gemini(prompt: str, api_key: str) -> tuple[str, str]:
     raise RuntimeError(" | ".join(errors) if errors else "Gemini failed with no details.")
 
 
-def _call_groq(prompt: str, api_key: str, model: str = "llama-3.3-70b-versatile") -> str:
+def _call_groq(
+    prompt: str,
+    api_key: str,
+    model: str = "llama-3.3-70b-versatile",
+    system: str = SYSTEM_ANALYST,
+) -> str:
     from groq import Groq
 
     if detect_key_provider(api_key) == "xai":
@@ -243,7 +281,7 @@ def _call_groq(prompt: str, api_key: str, model: str = "llama-3.3-70b-versatile"
         model=model,
         temperature=0.25,
         messages=[
-            {"role": "system", "content": SYSTEM_ANALYST},
+            {"role": "system", "content": system},
             {"role": "user", "content": prompt},
         ],
     )
@@ -253,13 +291,13 @@ def _call_groq(prompt: str, api_key: str, model: str = "llama-3.3-70b-versatile"
     return text.strip()
 
 
-def _call_xai(prompt: str, api_key: str) -> tuple[str, str]:
+def _call_xai(prompt: str, api_key: str, system: str = SYSTEM_ANALYST) -> tuple[str, str]:
     from openai import OpenAI
 
     client = OpenAI(api_key=api_key, base_url="https://api.x.ai/v1")
     errors: list[str] = []
     chat_messages = [
-        {"role": "system", "content": SYSTEM_ANALYST},
+        {"role": "system", "content": system},
         {"role": "user", "content": prompt},
     ]
     for model in XAI_MODELS:
@@ -284,11 +322,12 @@ def _call_openai(
     api_key: str,
     model: str = "gpt-4o-mini",
     messages: list[dict] | None = None,
+    system: str = SYSTEM_ANALYST,
 ) -> str:
     from openai import OpenAI
 
     client = OpenAI(api_key=api_key)
-    chat_messages = [{"role": "system", "content": SYSTEM_ANALYST}]
+    chat_messages = [{"role": "system", "content": system}]
     if messages:
         for msg in messages[-8:]:
             chat_messages.append({"role": msg["role"], "content": msg["content"]})
@@ -313,6 +352,7 @@ def generate_ai_text(
     openai_key: str = "",
     openai_model: str = "gpt-4o-mini",
     messages: list[dict] | None = None,
+    system: str = SYSTEM_ANALYST,
 ) -> tuple[str, str]:
     errors: list[str] = []
 
@@ -322,25 +362,30 @@ def generate_ai_text(
 
     if gemini_key and detect_key_provider(gemini_key) != "none":
         try:
-            return _call_gemini(prompt, gemini_key)
+            return _call_gemini(prompt, gemini_key, system=system)
         except Exception as exc:
             errors.append(f"Gemini: {exc}")
 
     if xai_key and detect_key_provider(xai_key) != "none":
         try:
-            return _call_xai(prompt, xai_key)
+            return _call_xai(prompt, xai_key, system=system)
         except Exception as exc:
             errors.append(f"xAI: {exc}")
 
     if groq_key and detect_key_provider(groq_key) != "none":
         try:
-            return _call_groq(prompt, groq_key), "Groq"
+            return _call_groq(prompt, groq_key, system=system), "Groq"
         except Exception as exc:
             errors.append(f"Groq: {exc}")
 
     if openai_key and detect_key_provider(openai_key) != "none":
         try:
-            return _call_openai(prompt, openai_key, openai_model, messages=messages), "OpenAI"
+            return (
+                _call_openai(
+                    prompt, openai_key, openai_model, messages=messages, system=system
+                ),
+                "OpenAI",
+            )
         except Exception as exc:
             errors.append(f"OpenAI: {exc}")
 
@@ -551,3 +596,288 @@ def research_holding_deep(
         "market": market,
         "technical": technical,
     }
+
+
+# ---------------------------------------------------------------------------
+# Generic Portfolio Analysis Engine (dynamic holdings → OpenBB → LLM)
+# ---------------------------------------------------------------------------
+
+_COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
+    "symbol": ("symbol", "Symbol", "ticker", "Ticker", "tradingsymbol"),
+    "quantity": ("quantity", "Quantity", "qty", "Qty"),
+    "buy_price": ("buy_price", "Buy Price", "average_price", "avg_price", "Avg Price"),
+    "current_price": ("current_price", "Current Price", "ltp", "LTP", "last_price", "Last Price"),
+    "asset_type": ("asset_type", "Asset Type", "asset", "Asset", "instrument_type", "Type"),
+}
+
+
+def _pick_column(df: pd.DataFrame, canonical: str) -> str | None:
+    for name in _COLUMN_ALIASES.get(canonical, ()):
+        if name in df.columns:
+            return name
+    lower_map = {str(c).strip().lower(): c for c in df.columns}
+    for name in _COLUMN_ALIASES.get(canonical, ()):
+        hit = lower_map.get(name.lower())
+        if hit is not None:
+            return hit
+    return None
+
+
+def normalize_holdings(holdings_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Accept any dynamic holdings DataFrame and return a canonical schema:
+    symbol, quantity, buy_price, current_price, asset_type (+ derived value cols).
+    Does not hardcode tickers.
+    """
+    if holdings_df is None or holdings_df.empty:
+        raise ValueError("Holdings DataFrame is empty.")
+
+    mapping: dict[str, str] = {}
+    for canonical in ("symbol", "quantity", "buy_price", "current_price", "asset_type"):
+        src = _pick_column(holdings_df, canonical)
+        if src:
+            mapping[src] = canonical
+
+    if "symbol" not in mapping.values():
+        raise ValueError("Holdings DataFrame must include a symbol/ticker column.")
+
+    out = holdings_df.rename(columns=mapping).copy()
+    for col in ("quantity", "buy_price", "current_price"):
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+        else:
+            out[col] = pd.NA
+
+    if "asset_type" not in out.columns:
+        out["asset_type"] = "equity"
+    else:
+        out["asset_type"] = out["asset_type"].fillna("equity").astype(str)
+
+    out["symbol"] = out["symbol"].astype(str).str.strip().str.upper()
+    out = out[out["symbol"].ne("") & out["symbol"].ne("NAN")].copy()
+    if out.empty:
+        raise ValueError("No valid symbols found in holdings.")
+
+    # Prefer existing Title-Case value columns when present (app portfolio schema).
+    if "Invested Value" in holdings_df.columns and "invested_value" not in out.columns:
+        out["invested_value"] = pd.to_numeric(holdings_df["Invested Value"], errors="coerce")
+    else:
+        out["invested_value"] = out["quantity"] * out["buy_price"]
+
+    if "Current Value" in holdings_df.columns and "current_value" not in out.columns:
+        out["current_value"] = pd.to_numeric(holdings_df["Current Value"], errors="coerce")
+    else:
+        out["current_value"] = out["quantity"] * out["current_price"]
+
+    if "P&L" in holdings_df.columns:
+        out["pnl"] = pd.to_numeric(holdings_df["P&L"], errors="coerce")
+    else:
+        out["pnl"] = out["current_value"] - out["invested_value"]
+
+    if "Return %" in holdings_df.columns:
+        out["return_pct"] = pd.to_numeric(holdings_df["Return %"], errors="coerce")
+    else:
+        out["return_pct"] = (out["pnl"] / out["invested_value"].replace(0, pd.NA)) * 100
+
+    total = float(out["current_value"].fillna(0).sum())
+    out["weight_pct"] = (
+        out["current_value"].fillna(0) / total * 100 if total else 0.0
+    )
+    return out
+
+
+def extract_unique_symbols(holdings: pd.DataFrame) -> list[str]:
+    """Unique ticker symbols from a normalized (or raw) holdings frame — never hardcoded."""
+    if "symbol" in holdings.columns:
+        series = holdings["symbol"]
+    else:
+        col = _pick_column(holdings, "symbol")
+        if not col:
+            return []
+        series = holdings[col]
+    return list(dict.fromkeys(str(s).strip().upper() for s in series if pd.notna(s) and str(s).strip()))
+
+
+def build_analysis_payload(
+    holdings: pd.DataFrame,
+    technicals: dict | None = None,
+) -> dict[str, Any]:
+    """Structured JSON payload: portfolio stats + OpenBB/Yahoo technical metrics."""
+    df = holdings if "weight_pct" in holdings.columns else normalize_holdings(holdings)
+    total_invested = float(df["invested_value"].fillna(0).sum())
+    total_current = float(df["current_value"].fillna(0).sum())
+    total_pnl = total_current - total_invested
+    overall_return = (total_pnl / total_invested * 100) if total_invested else 0.0
+
+    ranked = df.sort_values("current_value", ascending=False)
+    by_return = df.dropna(subset=["return_pct"]).sort_values("return_pct", ascending=False)
+
+    def _row_brief(row: pd.Series) -> dict[str, Any]:
+        return {
+            "symbol": row["symbol"],
+            "asset_type": row.get("asset_type", "equity"),
+            "weight_pct": round(float(row.get("weight_pct") or 0), 2),
+            "return_pct": round(float(row["return_pct"]), 2) if pd.notna(row.get("return_pct")) else None,
+            "pnl": round(float(row["pnl"]), 0) if pd.notna(row.get("pnl")) else None,
+            "current_value": round(float(row.get("current_value") or 0), 0),
+        }
+
+    top_gainers = [_row_brief(r) for _, r in by_return.head(5).iterrows()]
+    top_losers = [_row_brief(r) for _, r in by_return.tail(5).iloc[::-1].iterrows()]
+    top_weights = [_row_brief(r) for _, r in ranked.head(8).iterrows()]
+
+    allocation_by_type: dict[str, float] = {}
+    for asset, group in df.groupby(df["asset_type"].str.lower()):
+        allocation_by_type[str(asset)] = round(float(group["weight_pct"].sum()), 2)
+
+    tech_rows = (technicals or {}).get("metrics") or []
+    tech_by_symbol = {m["symbol"]: m for m in tech_rows if m.get("symbol")}
+
+    holdings_detail = []
+    for _, row in ranked.iterrows():
+        sym = row["symbol"]
+        tech = tech_by_symbol.get(sym, {})
+        holdings_detail.append(
+            {
+                **_row_brief(row),
+                "quantity": float(row["quantity"]) if pd.notna(row.get("quantity")) else None,
+                "buy_price": float(row["buy_price"]) if pd.notna(row.get("buy_price")) else None,
+                "current_price": float(row["current_price"]) if pd.notna(row.get("current_price")) else None,
+                "technicals": {
+                    "yahoo_ticker": tech.get("yahoo_ticker"),
+                    "rsi_14": tech.get("rsi_14"),
+                    "sma_50": tech.get("sma_50"),
+                    "momentum_20d_pct": tech.get("momentum_20d_pct"),
+                    "price_vs_sma50_pct": tech.get("price_vs_sma50_pct"),
+                    "last_close": tech.get("last_close"),
+                    "source": tech.get("source"),
+                    "error": tech.get("error"),
+                },
+            }
+        )
+
+    top3_weight = round(sum(h["weight_pct"] for h in top_weights[:3]), 2)
+    return {
+        "portfolio": {
+            "holding_count": int(len(df)),
+            "total_invested": round(total_invested, 0),
+            "total_current": round(total_current, 0),
+            "total_pnl": round(total_pnl, 0),
+            "overall_return_pct": round(overall_return, 2),
+            "top3_weight_pct": top3_weight,
+            "allocation_by_asset_type": allocation_by_type,
+        },
+        "top_weights": top_weights,
+        "top_gainers": top_gainers,
+        "top_losers": top_losers,
+        "holdings": holdings_detail,
+        "market_enrichment": {
+            "available": bool((technicals or {}).get("available")),
+            "coverage": (technicals or {}).get("coverage") or {},
+            "warnings": (technicals or {}).get("warnings") or [],
+        },
+    }
+
+
+def analyze_portfolio_engine(
+    holdings_df: pd.DataFrame,
+    *,
+    gemini_key: str = "",
+    groq_key: str = "",
+    xai_key: str = "",
+    openai_key: str = "",
+    max_symbols: int = 40,
+) -> dict[str, Any]:
+    """
+    End-to-end engine: normalize holdings → OpenBB/Yahoo technicals → LLM insights.
+    Individual API failures become warnings; the function returns a result dict
+    instead of crashing the Streamlit app.
+    """
+    warnings: list[str] = []
+    result: dict[str, Any] = {
+        "ok": False,
+        "text": "",
+        "provider": "",
+        "payload": {},
+        "technicals": {},
+        "warnings": warnings,
+    }
+
+    try:
+        holdings = normalize_holdings(holdings_df)
+    except Exception as exc:
+        logger.warning("Engine normalize failed: %s", exc)
+        warnings.append(f"normalize: {exc}")
+        result["warnings"] = warnings
+        return result
+
+    symbols = extract_unique_symbols(holdings)
+    # Align asset_type per unique symbol (first occurrence)
+    type_by_symbol: dict[str, str] = {}
+    for _, row in holdings.iterrows():
+        sym = row["symbol"]
+        if sym not in type_by_symbol:
+            type_by_symbol[sym] = str(row.get("asset_type") or "equity")
+
+    enrich_symbols = symbols[:max_symbols]
+    if len(symbols) > max_symbols:
+        warnings.append(f"Technical enrichment limited to top {max_symbols} unique symbols.")
+
+    asset_types = tuple(type_by_symbol.get(s) for s in enrich_symbols)
+    try:
+        technicals = pterm.enrich_symbols_technicals(tuple(enrich_symbols), asset_types)
+    except Exception as exc:
+        logger.warning("OpenBB technical enrichment failed: %s", exc)
+        warnings.append(f"openbb: {exc}")
+        technicals = {"available": False, "metrics": [], "warnings": [str(exc)]}
+
+    for w in technicals.get("warnings") or []:
+        warnings.append(w)
+
+    try:
+        payload = build_analysis_payload(holdings, technicals)
+    except Exception as exc:
+        logger.warning("Payload assembly failed: %s", exc)
+        warnings.append(f"payload: {exc}")
+        result["technicals"] = technicals
+        result["warnings"] = warnings
+        return result
+
+    result["payload"] = payload
+    result["technicals"] = technicals
+
+    try:
+        payload_json = json.dumps(payload, default=str, indent=2)
+        # Keep prompt size bounded for free-tier models
+        if len(payload_json) > 28000:
+            slim = {
+                "portfolio": payload["portfolio"],
+                "top_weights": payload["top_weights"],
+                "top_gainers": payload["top_gainers"],
+                "top_losers": payload["top_losers"],
+                "holdings": payload["holdings"][:20],
+                "market_enrichment": payload["market_enrichment"],
+            }
+            payload_json = json.dumps(slim, default=str, indent=2)
+            warnings.append("Payload truncated to top 20 holdings for LLM context limit.")
+
+        prompt = ENGINE_PROMPT.format(payload_json=payload_json)
+        text, provider = generate_ai_text(
+            prompt,
+            gemini_key=gemini_key,
+            groq_key=groq_key,
+            xai_key=xai_key,
+            openai_key=openai_key,
+            system=ENGINE_SYSTEM,
+        )
+        result["ok"] = True
+        result["text"] = text
+        result["provider"] = provider
+    except Exception as exc:
+        logger.warning("LLM portfolio analysis failed: %s", exc)
+        warnings.append(f"llm: {exc}")
+        result["text"] = ""
+        result["provider"] = ""
+
+    result["warnings"] = warnings
+    return result
