@@ -4,82 +4,123 @@ from __future__ import annotations
 
 import altair as alt
 import pandas as pd
-
-CHART_COLORS = [
-    "#2563EB",
-    "#059669",
-    "#7C3AED",
-    "#DC2626",
-    "#D97706",
-    "#0891B2",
-    "#EA580C",
-    "#64748B",
-]
-GREEN = "#059669"
-RED = "#DC2626"
-BLUE = "#2563EB"
-AMBER = "#D97706"
-GRAY = "#64748B"
-MUTED = "#64748B"
-TITLE = "#0F172A"
-GRID = "#E2E8F0"
-BG_STROKE = "#FFFFFF"
-
-# Compact type — charts sit beside metrics/tables; details live in tooltips.
-FS_TITLE = 13
-FS_SUBTITLE = 10
-FS_AXIS = 10
-FS_LEGEND = 10
+import streamlit as st
 
 
-def _title(text: str, subtitle: str | None = None) -> alt.TitleParams | str:
-    if not subtitle:
-        return text
+def _dark() -> bool:
+    try:
+        return st.context.theme.type == "dark"
+    except Exception:
+        return False
+
+
+_LIGHT_PALETTE = {
+    "colors": ["#4F46E5", "#047857", "#0E7490", "#BE123C", "#B45309", "#6D28D9", "#0F766E", "#94A3B8"],
+    "green": "#047857",
+    "red": "#BE123C",
+    "blue": "#4F46E5",
+    "amber": "#B45309",
+    "gray": "#94A3B8",
+    "muted": "#64748B",
+    "title": "#0B1220",
+    "grid": "#E3E8F0",
+    "axis": "#CBD5E1",
+    "stroke": "#FFFFFF",
+    "soft_green": "#6EE7B7",
+    "soft_red": "#FDA4AF",
+}
+_DARK_PALETTE = {
+    "colors": ["#818CF8", "#34D399", "#38BDF8", "#FB7185", "#FBBF24", "#A78BFA", "#2DD4BF", "#94A3B8"],
+    "green": "#34D399",
+    "red": "#FB7185",
+    "blue": "#818CF8",
+    "amber": "#FBBF24",
+    "gray": "#64748B",
+    "muted": "#94A3B8",
+    "title": "#E6EDF7",
+    "grid": "#23304B",
+    "axis": "#334155",
+    "stroke": "#0B1120",
+    "soft_green": "#0F766E",
+    "soft_red": "#9F1239",
+}
+
+
+def _p() -> dict:
+    return _DARK_PALETTE if _dark() else _LIGHT_PALETTE
+
+
+def _c(name: str) -> str:
+    return _p()[name]
+
+
+# Readable type — charts sit beside metrics/tables; details live in tooltips.
+FS_TITLE = 15
+FS_SUBTITLE = 11.5
+FS_AXIS = 11.5
+FS_LEGEND = 11.5
+
+
+HEADING_FONT = "Plus Jakarta Sans, Inter, sans-serif"
+BODY_FONT = "Inter, sans-serif"
+
+
+def _title(text: str, subtitle: str | None = None) -> alt.TitleParams:
     return alt.TitleParams(
         text=text,
-        subtitle=subtitle,
+        subtitle=subtitle or "",
         anchor="start",
+        font=HEADING_FONT,
         fontSize=FS_TITLE,
-        fontWeight=600,
-        color=TITLE,
-        subtitleColor=MUTED,
+        fontWeight=700,
+        color=_c("title"),
+        subtitleFont=BODY_FONT,
+        subtitleColor=_c("muted"),
         subtitleFontSize=FS_SUBTITLE,
         offset=6,
-        subtitlePadding=2,
+        subtitlePadding=4,
     )
 
 
-def _base_props(height: int = 280) -> dict:
-    return {"height": height, "padding": {"left": 4, "right": 8, "top": 4, "bottom": 4}}
+def _base_props(height: int = 280, top: int = 30) -> dict:
+    # Top padding reserves room for the title block so it never clips.
+    return {"height": height, "padding": {"left": 4, "right": 8, "top": top, "bottom": 6}}
 
 
 def _style(chart: alt.Chart | alt.LayerChart) -> alt.Chart:
     return (
         chart.configure_view(strokeWidth=0)
         .configure_axis(
-            labelColor=MUTED,
-            titleColor=MUTED,
-            gridColor=GRID,
-            gridOpacity=0.35,
-            domainColor="#CBD5E1",
-            tickColor="#CBD5E1",
+            labelFont=BODY_FONT,
+            titleFont=BODY_FONT,
+            labelColor=_c("muted"),
+            titleColor=_c("muted"),
+            gridColor=_c("grid"),
+            gridOpacity=0.55,
+            gridDash=[2, 4],
+            domainColor=_c("axis"),
+            tickColor=_c("axis"),
             labelFontSize=FS_AXIS,
             titleFontSize=FS_AXIS,
-            titlePadding=6,
-            labelPadding=2,
+            titleFontWeight=500,
+            titlePadding=8,
+            labelPadding=4,
         )
         .configure_axisX(grid=False)
         .configure_axisY(domain=False, ticks=False)
         .configure_legend(
-            labelColor=MUTED,
-            titleColor=MUTED,
+            labelFont=BODY_FONT,
+            titleFont=BODY_FONT,
+            labelColor=_c("muted"),
+            titleColor=_c("muted"),
             labelFontSize=FS_LEGEND,
-            symbolSize=60,
+            symbolSize=90,
+            symbolType="circle",
             orient="bottom",
             direction="horizontal",
             columns=3,
-            padding=2,
-            offset=4,
+            padding=4,
+            offset=8,
         )
         .configure_title(anchor="start")
     )
@@ -132,7 +173,7 @@ def _donut(
         .mark_arc(
             innerRadius=62,
             outerRadius=108,
-            stroke=BG_STROKE,
+            stroke=_c("stroke"),
             strokeWidth=2,
             padAngle=0.012,
             cornerRadius=2,
@@ -141,7 +182,7 @@ def _donut(
             theta=alt.Theta(f"{value_col}:Q", stack=True),
             color=alt.Color(
                 f"{category}:N",
-                scale=alt.Scale(range=CHART_COLORS),
+                scale=alt.Scale(range=_c("colors")),
                 legend=alt.Legend(title=None, labelLimit=120),
             ),
             order=alt.Order(f"{weight_col}:Q", sort="descending"),
@@ -151,7 +192,7 @@ def _donut(
                 alt.Tooltip(f"{value_col}:Q", format=",.0f", title="Value (₹)"),
             ],
         )
-        .properties(**_base_props(height), title=_title(title, subtitle))
+        .properties(**_base_props(height, top=56), title=_title(title, subtitle))
     )
     return _style(chart)
 
@@ -206,7 +247,7 @@ def weight_bar_colored(merged: pd.DataFrame, limit: int = 12) -> alt.Chart:
             y=alt.Y("Symbol:N", sort="-x", title=None, axis=alt.Axis(labelLimit=80)),
             color=alt.Color(
                 "Performance:N",
-                scale=alt.Scale(domain=["Gain", "Loss"], range=[GREEN, RED]),
+                scale=alt.Scale(domain=["Gain", "Loss"], range=[_c("green"), _c("red")]),
                 legend=alt.Legend(title=None),
             ),
             tooltip=[
@@ -234,7 +275,7 @@ def stock_concentration_bars(merged: pd.DataFrame, limit: int = 8) -> alt.Chart:
             y=alt.Y("Symbol:N", sort="-x", title=None, axis=alt.Axis(labelLimit=80)),
             color=alt.Color(
                 "Return %:Q",
-                scale=alt.Scale(domainMid=0, range=[RED, MUTED, GREEN]),
+                scale=alt.Scale(domainMid=0, range=[_c("red"), _c("muted"), _c("green")]),
                 legend=None,
             ),
             tooltip=[
@@ -247,7 +288,7 @@ def stock_concentration_bars(merged: pd.DataFrame, limit: int = 8) -> alt.Chart:
     )
     rule15 = (
         alt.Chart(pd.DataFrame({"x": [15], "note": ["15% line"]}))
-        .mark_rule(strokeDash=[4, 4], color=AMBER, opacity=0.6)
+        .mark_rule(strokeDash=[4, 4], color=_c("amber"), opacity=0.6)
         .encode(x="x:Q")
     )
     return _style(
@@ -264,7 +305,7 @@ def cumulative_concentration(merged: pd.DataFrame) -> alt.Chart:
 
     line = (
         alt.Chart(data)
-        .mark_line(color=BLUE, strokeWidth=2, point=alt.OverlayMarkDef(size=40, filled=True))
+        .mark_line(color=_c("blue"), strokeWidth=2, point=alt.OverlayMarkDef(size=40, filled=True))
         .encode(
             x=alt.X(
                 "Symbol:N",
@@ -286,7 +327,7 @@ def cumulative_concentration(merged: pd.DataFrame) -> alt.Chart:
     )
     rules = (
         alt.Chart(pd.DataFrame({"y": [50, 80]}))
-        .mark_rule(strokeDash=[4, 4], color=MUTED, opacity=0.45)
+        .mark_rule(strokeDash=[4, 4], color=_c("muted"), opacity=0.45)
         .encode(y="y:Q")
     )
     return _style(
@@ -313,7 +354,7 @@ def return_weight_scatter(merged: pd.DataFrame) -> alt.Chart:
     )
     points = (
         alt.Chart(data)
-        .mark_circle(opacity=0.85, stroke=BG_STROKE, strokeWidth=1)
+        .mark_circle(opacity=0.85, stroke=_c("stroke"), strokeWidth=1)
         .encode(
             x=alt.X("Weight %:Q", title="Weight %", scale=alt.Scale(zero=True, nice=True)),
             y=alt.Y("Return %:Q", title="Return %", scale=alt.Scale(nice=True)),
@@ -322,7 +363,7 @@ def return_weight_scatter(merged: pd.DataFrame) -> alt.Chart:
                 "Bucket:N",
                 scale=alt.Scale(
                     domain=["Core winner", "Core loser", "Small winner", "Small loser"],
-                    range=[GREEN, RED, "#6EE7B7", "#FCA5A5"],
+                    range=[_c("green"), _c("red"), _c("soft_green"), _c("soft_red")],
                 ),
                 legend=alt.Legend(title=None, labelLimit=100),
             ),
@@ -334,10 +375,10 @@ def return_weight_scatter(merged: pd.DataFrame) -> alt.Chart:
             ],
         )
     )
-    h_rule = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(color=MUTED, opacity=0.45).encode(y="y:Q")
+    h_rule = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(color=_c("muted"), opacity=0.45).encode(y="y:Q")
     v_rule = (
         alt.Chart(pd.DataFrame({"x": [5, 15]}))
-        .mark_rule(strokeDash=[4, 4], color=MUTED, opacity=0.3)
+        .mark_rule(strokeDash=[4, 4], color=_c("muted"), opacity=0.3)
         .encode(x="x:Q")
     )
     return _style(
@@ -363,7 +404,7 @@ def pnl_waterfall(merged: pd.DataFrame, limit: int = 8) -> alt.Chart:
             y=alt.Y("Symbol:N", sort="x", title=None, axis=alt.Axis(labelLimit=80)),
             color=alt.Color(
                 "Direction:N",
-                scale=alt.Scale(domain=["Loss", "Gain"], range=[RED, GREEN]),
+                scale=alt.Scale(domain=["Loss", "Gain"], range=[_c("red"), _c("green")]),
                 legend=None,
             ),
             tooltip=[
@@ -373,7 +414,7 @@ def pnl_waterfall(merged: pd.DataFrame, limit: int = 8) -> alt.Chart:
             ],
         )
     )
-    zero = alt.Chart(pd.DataFrame({"x": [0]})).mark_rule(color=MUTED, opacity=0.45).encode(x="x:Q")
+    zero = alt.Chart(pd.DataFrame({"x": [0]})).mark_rule(color=_c("muted"), opacity=0.45).encode(x="x:Q")
     return _style(
         (zero + bars).properties(
             height=_bar_height(len(data)),
@@ -400,7 +441,7 @@ def profit_loss_split(metrics: dict) -> alt.Chart:
                 "Outcome:N",
                 scale=alt.Scale(
                     domain=["In profit", "In loss", "Flat"],
-                    range=[GREEN, RED, GRAY],
+                    range=[_c("green"), _c("red"), _c("gray")],
                 ),
                 legend=None,
             ),
@@ -420,7 +461,7 @@ def sector_weight_bar(sector_df: pd.DataFrame) -> alt.Chart:
             y=alt.Y("Sector:N", sort="-x", title=None, axis=alt.Axis(labelLimit=100)),
             color=alt.Color(
                 "Return %:Q",
-                scale=alt.Scale(domainMid=0, range=[RED, MUTED, GREEN]),
+                scale=alt.Scale(domainMid=0, range=[_c("red"), _c("muted"), _c("green")]),
                 legend=alt.Legend(title="Return", orient="bottom", gradientLength=80),
             ),
             tooltip=[
@@ -448,7 +489,7 @@ def sector_return_bar(sector_df: pd.DataFrame) -> alt.Chart:
             y=alt.Y("Sector:N", sort="-x", title=None, axis=alt.Axis(labelLimit=100)),
             color=alt.Color(
                 "Direction:N",
-                scale=alt.Scale(domain=["Gain", "Loss"], range=[GREEN, RED]),
+                scale=alt.Scale(domain=["Gain", "Loss"], range=[_c("green"), _c("red")]),
                 legend=None,
             ),
             tooltip=[
@@ -459,7 +500,7 @@ def sector_return_bar(sector_df: pd.DataFrame) -> alt.Chart:
             ],
         )
     )
-    zero = alt.Chart(pd.DataFrame({"x": [0]})).mark_rule(color=MUTED, opacity=0.45).encode(x="x:Q")
+    zero = alt.Chart(pd.DataFrame({"x": [0]})).mark_rule(color=_c("muted"), opacity=0.45).encode(x="x:Q")
     return _style(
         (zero + bars).properties(
             height=_bar_height(len(data)),
@@ -481,7 +522,7 @@ def nifty_vs_portfolio_line(chart_df: pd.DataFrame) -> alt.Chart:
             y=alt.Y("Indexed:Q", title="Indexed (100 = start)", scale=alt.Scale(zero=False, nice=True)),
             color=alt.Color(
                 "Series:N",
-                scale=alt.Scale(domain=["Your portfolio", "Nifty 50"], range=[BLUE, AMBER]),
+                scale=alt.Scale(domain=["Your portfolio", "Nifty 50"], range=[_c("blue"), _c("amber")]),
                 legend=None,
             ),
         )
@@ -494,7 +535,7 @@ def nifty_vs_portfolio_line(chart_df: pd.DataFrame) -> alt.Chart:
             y="Indexed:Q",
             color=alt.Color(
                 "Series:N",
-                scale=alt.Scale(domain=["Your portfolio", "Nifty 50"], range=[BLUE, AMBER]),
+                scale=alt.Scale(domain=["Your portfolio", "Nifty 50"], range=[_c("blue"), _c("amber")]),
                 legend=alt.Legend(title=None),
             ),
             tooltip=[
@@ -506,7 +547,7 @@ def nifty_vs_portfolio_line(chart_df: pd.DataFrame) -> alt.Chart:
     )
     baseline = (
         alt.Chart(pd.DataFrame({"y": [100]}))
-        .mark_rule(strokeDash=[4, 4], color=MUTED, opacity=0.4)
+        .mark_rule(strokeDash=[4, 4], color=_c("muted"), opacity=0.4)
         .encode(y="y:Q")
     )
     return _style(
@@ -527,7 +568,7 @@ def benchmark_return_bars(comparison: pd.DataFrame) -> alt.Chart:
             y=alt.Y("Return %:Q", title="Return %"),
             color=alt.Color(
                 "Benchmark:N",
-                scale=alt.Scale(domain=["Your portfolio", "Nifty 50"], range=[BLUE, AMBER]),
+                scale=alt.Scale(domain=["Your portfolio", "Nifty 50"], range=[_c("blue"), _c("amber")]),
                 legend=None,
             ),
             tooltip=[
@@ -536,7 +577,7 @@ def benchmark_return_bars(comparison: pd.DataFrame) -> alt.Chart:
             ],
         )
     )
-    zero = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(color=MUTED, opacity=0.45).encode(y="y:Q")
+    zero = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(color=_c("muted"), opacity=0.45).encode(y="y:Q")
     return _style(
         (zero + bars).properties(
             **_base_props(220),
@@ -570,7 +611,7 @@ def sector_vs_nifty_grouped(active_df: pd.DataFrame) -> alt.Chart:
             x=alt.X("Weight %:Q", title="Weight %"),
             color=alt.Color(
                 "Source:N",
-                scale=alt.Scale(domain=["You", "Nifty"], range=[BLUE, AMBER]),
+                scale=alt.Scale(domain=["You", "Nifty"], range=[_c("blue"), _c("amber")]),
                 legend=alt.Legend(title=None),
             ),
             yOffset="Source:N",
@@ -604,7 +645,7 @@ def active_weight_bar(active_df: pd.DataFrame) -> alt.Chart:
             x=alt.X("Active weight %:Q", title="You − Nifty (%)"),
             color=alt.Color(
                 "Tilt:N",
-                scale=alt.Scale(domain=["Over", "Under"], range=[GREEN, RED]),
+                scale=alt.Scale(domain=["Over", "Under"], range=[_c("green"), _c("red")]),
                 legend=alt.Legend(title=None),
             ),
             tooltip=[
@@ -615,7 +656,7 @@ def active_weight_bar(active_df: pd.DataFrame) -> alt.Chart:
             ],
         )
     )
-    zero = alt.Chart(pd.DataFrame({"x": [0]})).mark_rule(color=MUTED, opacity=0.45).encode(x="x:Q")
+    zero = alt.Chart(pd.DataFrame({"x": [0]})).mark_rule(color=_c("muted"), opacity=0.45).encode(x="x:Q")
     return _style(
         (zero + bars).properties(
             height=_bar_height(len(data), row_px=28),
@@ -636,7 +677,7 @@ def correlation_heatmap(corr: pd.DataFrame) -> alt.Chart | None:
 
     chart = (
         alt.Chart(data)
-        .mark_rect(stroke="#E2E8F0", strokeWidth=1)
+        .mark_rect(stroke=_c("stroke"), strokeWidth=1, cornerRadius=2)
         .encode(
             x=alt.X("Symbol A:N", sort=order, title=None, axis=alt.Axis(labelAngle=-35)),
             y=alt.Y("Symbol B:N", sort=order, title=None),

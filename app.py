@@ -334,31 +334,68 @@ def calculate_portfolio(api_key: str, access_token: str, groww_file) -> None:
     pmd.clear_market_cache()
 
 
+def wealth_trend_series(column: str = "total_current", points: int = 12) -> list[float] | None:
+    """Recent snapshot values for metric sparklines."""
+    try:
+        history = ph.load_snapshots()
+    except Exception:
+        return None
+    if history.empty or column not in history.columns or len(history) < 3:
+        return None
+    values = history[column].tail(points).astype(float).tolist()
+    return values if len(values) >= 3 else None
+
+
 def render_portfolio_tab(portfolio_df: pd.DataFrame, summary: dict) -> None:
-    total_return = (
-        summary["pl_amount"] / summary["total_invested"] * 100 if summary["total_invested"] else 0
+    if portfolio_df.empty:
+        return
+
+    winners = int((portfolio_df["P&L"] > 0).sum())
+    losers = int((portfolio_df["P&L"] < 0).sum())
+    best = portfolio_df.loc[portfolio_df["Return %"].idxmax()]
+    worst = portfolio_df.loc[portfolio_df["Return %"].idxmin()]
+    largest = portfolio_df.loc[portfolio_df["Current Value"].idxmax()]
+    largest_weight = (
+        largest["Current Value"] / summary["total_current"] * 100 if summary["total_current"] else 0
     )
-    pui.kpi_row(
-        [
-            ("Total invested", pui.format_inr(summary["total_invested"]), None),
-            (
-                "Current value",
-                pui.format_inr(summary["total_current"]),
-                pui.format_inr(summary["pl_amount"]),
-            ),
-            ("Total return", pui.format_pct(total_return), f"{summary['holding_count']} holdings"),
-            (
-                "Zerodha",
-                pui.format_inr(summary.get("zerodha_current", 0)),
-                None,
-            ),
-            (
-                "Groww",
-                pui.format_inr(summary.get("groww_current", 0)),
-                None,
-            ),
-        ]
-    )
+    trend = wealth_trend_series("total_current")
+
+    cards: list[dict] = [
+        {
+            "label": "Best performer",
+            "value": str(best["Symbol"]),
+            "delta": pui.format_pct(float(best["Return %"])),
+        },
+        {
+            "label": "Weakest holding",
+            "value": str(worst["Symbol"]),
+            "delta": pui.format_pct(float(worst["Return %"])),
+        },
+        {
+            "label": "Largest position",
+            "value": str(largest["Symbol"]),
+            "delta": f"{largest_weight:.1f}% of portfolio",
+            "delta_color": "off",
+        },
+        {
+            "label": "Winners vs losers",
+            "value": f"{winners} up · {losers} down",
+            "delta": f"{winners / len(portfolio_df) * 100:.0f}% in profit",
+            "delta_color": "off",
+        },
+    ]
+    if trend:
+        cards.append(
+            {
+                "label": "Wealth trend",
+                "value": pui.format_inr_compact(trend[-1]),
+                "delta": f"last {len(trend)} snapshots",
+                "delta_color": "off",
+                "chart": trend,
+                "chart_type": "area",
+            }
+        )
+    pui.kpi_row(cards)
 
     pui.section("Platform breakdown", "Invested vs current by broker", icon="pie_chart")
     platforms = list(portfolio_df["Owner"].unique())
@@ -369,23 +406,32 @@ def render_portfolio_tab(portfolio_df: pd.DataFrame, summary: dict) -> None:
         plat_current = plat_df["Current Value"].sum()
         plat_pl = plat_current - plat_invested
         plat_ret = (plat_pl / plat_invested * 100) if plat_invested else 0
+        share = plat_current / summary["total_current"] * 100 if summary["total_current"] else 0
         with plat_cols[idx % len(plat_cols)]:
-            with st.container(border=True):
-                st.markdown(f"**:material/store: {platform}**")
+            with st.container(border=True, height="stretch"):
+                st.markdown(
+                    f"**:material/store: {platform}** &nbsp;"
+                    f"{pui.tone_badge(plat_ret, pui.format_pct(plat_ret))}"
+                )
                 with st.container(horizontal=True):
-                    st.metric("Invested", pui.format_inr(plat_invested), border=True)
+                    st.metric("Invested", pui.format_inr_compact(plat_invested), border=True)
                     st.metric(
                         "Current",
-                        pui.format_inr(plat_current),
-                        pui.format_inr(plat_pl),
+                        pui.format_inr_compact(plat_current),
+                        pui.format_inr_compact(plat_pl),
                         border=True,
                     )
-                st.caption(f"{len(plat_df)} holdings · {pui.format_pct(plat_ret)} return")
+                st.caption(f"{len(plat_df)} holdings · {share:.0f}% of portfolio")
 
-    pui.section("Holdings", "Consolidated view across platforms", icon="table_chart")
+    pui.section("Holdings", "Sorted by current value · weight bar shows size", icon="table_chart")
+    table = portfolio_df.copy()
+    total_value = table["Current Value"].sum()
+    table["Weight %"] = table["Current Value"] / total_value * 100 if total_value else 0
+    table = table.sort_values("Current Value", ascending=False)
     display_cols = [
-        "Owner",
         "Symbol",
+        "Owner",
+        "Weight %",
         "Quantity",
         "Buy Price",
         "Current Price",
@@ -396,23 +442,29 @@ def render_portfolio_tab(portfolio_df: pd.DataFrame, summary: dict) -> None:
     ]
     with st.container(border=True):
         st.dataframe(
-            portfolio_df[display_cols],
-            width="stretch",
+            table[display_cols],
             hide_index=True,
             column_config={
-                "Invested Value": st.column_config.NumberColumn(format="₹%d"),
-                "Current Value": st.column_config.NumberColumn(format="₹%d"),
+                "Symbol": st.column_config.TextColumn(pinned=True),
+                "Weight %": st.column_config.ProgressColumn(
+                    "Weight",
+                    format="%.1f%%",
+                    min_value=0,
+                    max_value=float(max(table["Weight %"].max(), 1)),
+                ),
+                "Invested Value": st.column_config.NumberColumn("Invested", format="₹%d"),
+                "Current Value": st.column_config.NumberColumn("Current", format="₹%d"),
                 "P&L": st.column_config.NumberColumn(format="₹%d"),
-                "Return %": st.column_config.NumberColumn(format="%+.1f%%"),
-                "Buy Price": st.column_config.NumberColumn(format="₹%.2f"),
-                "Current Price": st.column_config.NumberColumn(format="₹%.2f"),
+                "Return %": st.column_config.NumberColumn("Return", format="%+.1f%%"),
+                "Buy Price": st.column_config.NumberColumn("Avg buy", format="₹%.2f"),
+                "Current Price": st.column_config.NumberColumn("LTP", format="₹%.2f"),
             },
         )
 
-    with st.expander(":material/bug_report: Line-by-line debug", expanded=False):
+    with st.expander("Line-by-line debug", icon=":material/bug_report:", expanded=False):
         debug_df = portfolio_df.copy()
         debug_df["Line total"] = debug_df["Quantity"] * debug_df["Current Price"]
-        st.dataframe(debug_df, width="stretch", hide_index=True)
+        st.dataframe(debug_df, hide_index=True)
 
 
 def render_trends_tab() -> None:
@@ -426,20 +478,44 @@ def render_trends_tab() -> None:
         )
         return
 
+    colors = pui.chart_colors()
     monthly = ph.get_monthly_summary(history)
     last_saved = history["date"].max().date()
     days_since = (pd.Timestamp.today().normalize() - pd.Timestamp(last_saved)).days
+    latest_value = float(history["total_current"].iloc[-1])
+    first_value = float(history["total_current"].iloc[0])
+    since_start = (latest_value - first_value) / first_value * 100 if first_value else 0
+    trend = history["total_current"].tail(12).astype(float).tolist()
 
     pui.kpi_row(
         [
-            ("Snapshots", str(len(history)), None),
-            ("Last saved", last_saved.strftime("%d %b %Y"), None),
-            ("Days since save", str(days_since), "Weekly saves recommended" if days_since > 7 else None),
-            (
-                "Latest value",
-                pui.format_inr(float(history["total_current"].iloc[-1])),
-                None,
-            ),
+            {
+                "label": "Latest value",
+                "value": pui.format_inr(latest_value),
+                "delta": pui.format_pct(since_start) + " since first snapshot",
+                "chart": trend if len(trend) >= 3 else None,
+                "chart_type": "area",
+            },
+            {
+                "label": "Snapshots saved",
+                "value": str(len(history)),
+                "delta": f"since {history['date'].min().strftime('%d %b %Y')}",
+                "delta_color": "off",
+            },
+            {
+                "label": "Last saved",
+                "value": last_saved.strftime("%d %b"),
+                "delta": f"{days_since} days ago",
+                "delta_color": "inverse" if days_since > 7 else "off",
+            },
+            {
+                "label": "Unrealised P&L",
+                "value": pui.format_inr_compact(float(history["pl_amount"].iloc[-1])),
+                "chart": history["pl_amount"].tail(12).astype(float).tolist()
+                if len(history) >= 3
+                else None,
+                "chart_type": "bar",
+            },
         ]
     )
 
@@ -449,45 +525,68 @@ def render_trends_tab() -> None:
             kind="warning",
         )
 
-    pui.section("Wealth over time", icon="show_chart")
-    value_chart_df = history.set_index("date")[["total_invested", "total_current"]]
+    pui.section("Wealth over time", "Invested base vs live market value", icon="show_chart")
+    value_chart_df = history.set_index("date")[["total_invested", "total_current"]].rename(
+        columns={"total_invested": "Invested", "total_current": "Current value"}
+    )
     with st.container(border=True):
-        st.line_chart(
+        st.area_chart(
             value_chart_df,
-            color=[pui.CHART_LINE_INVESTED, pui.CHART_LINE_CURRENT],
+            color=[colors["current"], colors["invested"]],
+            stack=False,
         )
-        st.caption(":gray[Gray = invested · Green = current value]")
 
     if len(monthly) >= 2:
-        pui.section("Monthly growth", icon="bar_chart")
+        pui.section("Monthly growth", "Change in portfolio value month over month", icon="bar_chart")
         growth_col1, growth_col2 = st.columns(2)
         with growth_col1:
-            with st.container(border=True):
-                st.markdown("**Monthly change (₹)**")
-                change_df = monthly.set_index("date")[["monthly_change"]].dropna()
-                st.bar_chart(change_df, color=pui.CHART_BAR_CHANGE)
+            with st.container(border=True, height="stretch"):
+                st.markdown("**Monthly change**")
+                st.caption("Rupee movement between month-end snapshots")
+                change_df = (
+                    monthly.set_index("date")[["monthly_change"]]
+                    .dropna()
+                    .rename(columns={"monthly_change": "Change (₹)"})
+                )
+                st.bar_chart(change_df, color=colors["change"])
         with growth_col2:
-            with st.container(border=True):
-                st.markdown("**Monthly growth (%)**")
-                pct_df = monthly.set_index("date")[["monthly_growth_pct"]].dropna()
-                st.bar_chart(pct_df, color=pui.CHART_BAR_GROWTH)
+            with st.container(border=True, height="stretch"):
+                st.markdown("**Monthly growth**")
+                st.caption("Percentage change between month-end snapshots")
+                pct_df = (
+                    monthly.set_index("date")[["monthly_growth_pct"]]
+                    .dropna()
+                    .rename(columns={"monthly_growth_pct": "Growth (%)"})
+                )
+                st.bar_chart(pct_df, color=colors["growth"])
     else:
         st.caption("Save snapshots across at least two months to unlock monthly growth charts.")
 
     if "zerodha_current" in history.columns and history[["zerodha_current", "groww_current"]].sum().sum() > 0:
-        pui.section("Platform split over time", icon="stacked_line_chart")
-        platform_df = history.set_index("date")[["zerodha_current", "groww_current"]]
+        pui.section("Platform split over time", "Zerodha vs Groww contribution", icon="stacked_line_chart")
+        platform_df = history.set_index("date")[["zerodha_current", "groww_current"]].rename(
+            columns={"zerodha_current": "Zerodha", "groww_current": "Groww"}
+        )
         with st.container(border=True):
-            st.area_chart(
-                platform_df,
-                color=[pui.CHART_AREA_ZERODHA, pui.CHART_AREA_GROWW],
-            )
+            st.area_chart(platform_df, color=[colors["groww"], colors["zerodha"]])
 
-    pui.section("Snapshot log", icon="history")
-    display_history = history.copy()
-    display_history["date"] = display_history["date"].dt.strftime("%Y-%m-%d")
+    pui.section("Snapshot log", "Every saved point, newest first", icon="history")
+    display_history = history.sort_values("date", ascending=False).copy()
     with st.container(border=True):
-        st.dataframe(display_history, width="stretch", hide_index=True)
+        st.dataframe(
+            display_history,
+            hide_index=True,
+            column_config={
+                "date": st.column_config.DatetimeColumn("Date", format="DD MMM YYYY", pinned=True),
+                "total_invested": st.column_config.NumberColumn("Invested", format="₹%d"),
+                "total_current": st.column_config.NumberColumn("Current", format="₹%d"),
+                "pl_amount": st.column_config.NumberColumn("P&L", format="₹%d"),
+                "zerodha_current": st.column_config.NumberColumn("Zerodha", format="₹%d"),
+                "groww_current": st.column_config.NumberColumn("Groww", format="₹%d"),
+                "holding_count": st.column_config.NumberColumn("Holdings"),
+                "created_at": None,
+            },
+        )
 
 
 def get_fmp_api_key() -> str:
@@ -1739,7 +1838,13 @@ def render_zerodha_sidebar() -> tuple[str, str]:
 
     if not cred_error and api_key:
         label = "Reconnect Zerodha" if connected else "Connect Zerodha"
-        st.link_button(label, zauth.login_url(api_key), use_container_width=True, type="primary")
+        st.link_button(
+            label,
+            zauth.login_url(api_key),
+            width="stretch",
+            type="primary",
+            icon=":material/link:",
+        )
 
     if secrets_ready:
         with st.expander("Advanced / troubleshooting"):
@@ -1762,7 +1867,7 @@ def render_zerodha_sidebar() -> tuple[str, str]:
                         st.rerun()
                     except Exception as exc:
                         st.error(str(exc))
-            if st.button("Clear cached login", use_container_width=True):
+            if st.button("Clear cached login", width="stretch"):
                 zauth.clear_cached_token()
                 st.session_state.zerodha_access_token = ""
                 st.session_state.zerodha_auth_success = ""
@@ -1817,10 +1922,15 @@ with st.sidebar.container(border=True):
     )
 
 st.sidebar.space("small")
-if st.sidebar.button("Calculate live wealth", type="primary", use_container_width=True):
+if st.sidebar.button(
+    "Calculate live wealth",
+    type="primary",
+    width="stretch",
+    icon=":material/bolt:",
+):
     calculate_portfolio(api_key, access_token, groww_file)
 
-if st.sidebar.button("Save today's snapshot", use_container_width=True):
+if st.sidebar.button("Save today's snapshot", width="stretch", icon=":material/photo_camera:"):
     if st.session_state.portfolio_summary is None:
         st.sidebar.warning("Calculate your portfolio first.")
     else:
@@ -1840,12 +1950,20 @@ if last_snapshot:
     st.sidebar.caption(f"Last snapshot · {last_snapshot.strftime('%d %b %Y')}")
 
 # --- Main navigation ---
+NAV_ICONS = {
+    "Portfolio": ":material/account_balance_wallet: Portfolio",
+    "Trends": ":material/timeline: Trends",
+    "Insights": ":material/insights: Insights",
+}
 main_view = st.segmented_control(
     "Dashboard view",
     ["Portfolio", "Trends", "Insights"],
     default="Portfolio",
+    format_func=lambda view: NAV_ICONS[view],
     label_visibility="collapsed",
+    width="stretch",
 )
+main_view = main_view or "Portfolio"
 
 pui.page_header(main_view, st.session_state.portfolio_summary)
 st.space("small")
