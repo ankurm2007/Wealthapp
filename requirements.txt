@@ -1,0 +1,12 @@
+streamlit
+pandas
+kiteconnect
+openpyxl
+altair
+yfinance
+openbb
+openai
+python-dotenv
+requests
+groq
+google-generativeai
