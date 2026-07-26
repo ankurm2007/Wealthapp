@@ -32,11 +32,11 @@ def _match(question: str, *patterns: str) -> bool:
 def try_rule_based_answer(question: str, merged: pd.DataFrame, metrics: dict) -> str | None:
     if _match(question, r"\bmulti-?agent\b", r"\bhow do i run deep\b"):
         return (
-            "Use the panels above:\n"
+            "Use the **Research** page:\n"
             "1. **AI portfolio briefing** — full portfolio memo\n"
-            "2. **Deep holding research** — Gemini/Groq note on one stock\n"
-            "3. **Multi-agent analyzer** — yfinance + RSI + sentiment + Gemini\n"
-            "4. **Research chat** — agent mode picks live tools (earnings, shareholding, Nifty) then answers.\n"
+            "2. **Deep holding research** — fundamentals + technicals on one stock\n"
+            "3. **Portfolio chat** — agent mode picks live tools then answers\n"
+            "For the quantitative scorecard (health/risk/RSI board), open **Insights**.\n"
             "Set Gemini / Groq keys in secrets or `.env` for the best answers."
         )
 

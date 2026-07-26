@@ -1,95 +1,80 @@
+[server]
+headless = true
+fileWatcherType = "poll"
+runOnSave = true
+
+[browser]
+gatherUsageStats = false
+serverAddress = "localhost"
+
+# Single light theme only — no [theme.dark], so OS dark mode cannot turn the app black.
 [theme]
-font = "'Inter':https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
-headingFont = "'Plus Jakarta Sans':https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800&display=swap"
-codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
+base = "light"
+font = "'Source Sans 3':https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600;700&display=swap"
+headingFont = "'Literata':https://fonts.googleapis.com/css2?family=Literata:opsz,wght@7..72,500;7..72,600;7..72,700&display=swap"
+codeFont = "'IBM Plex Mono':https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap"
 baseFontSize = 15
 baseFontWeight = 400
 codeFontSize = "13px"
-headingFontSizes = ["34px", "25px", "19px", "16px", "14px", "13px"]
-headingFontWeights = [800, 700, 700, 600, 600, 600]
+headingFontSizes = ["34px", "22px", "18px", "15px", "14px", "13px"]
+headingFontWeights = [600, 600, 600, 600, 600, 600]
 linkUnderline = false
-baseRadius = "12px"
+baseRadius = "10px"
 buttonRadius = "10px"
 showWidgetBorder = true
 showSidebarBorder = true
-chartCategoricalColors = [
-    "#6366F1",
-    "#10B981",
-    "#0EA5E9",
-    "#F43F5E",
-    "#F59E0B",
-    "#8B5CF6",
-    "#14B8A6",
-    "#94A3B8",
-]
-chartSequentialColors = [
-    "#EEF2FF",
-    "#E0E7FF",
-    "#C7D2FE",
-    "#A5B4FC",
-    "#818CF8",
-    "#6366F1",
-    "#4F46E5",
-    "#4338CA",
-    "#3730A3",
-    "#312E81",
-]
 
-[theme.light]
-primaryColor = "#4F46E5"
-backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F5F7FB"
-textColor = "#0B1220"
-linkColor = "#4F46E5"
-borderColor = "#E3E8F0"
-codeBackgroundColor = "#F5F7FB"
-codeTextColor = "#334155"
-dataframeBorderColor = "#E3E8F0"
-dataframeHeaderBackgroundColor = "#F5F7FB"
-greenColor = "#047857"
-greenBackgroundColor = "#D9F7EA"
-greenTextColor = "#065F46"
-redColor = "#BE123C"
-redBackgroundColor = "#FFE4E9"
+primaryColor = "#2563EB"
+backgroundColor = "#F5F8FF"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#1E293B"
+linkColor = "#1D4ED8"
+borderColor = "#BFDBFE"
+codeBackgroundColor = "#EFF6FF"
+codeTextColor = "#1E3A8A"
+dataframeBorderColor = "#BFDBFE"
+dataframeHeaderBackgroundColor = "#DBEAFE"
+
+greenColor = "#16A34A"
+greenBackgroundColor = "#DCFCE7"
+greenTextColor = "#166534"
+redColor = "#E11D48"
+redBackgroundColor = "#FFE4E6"
 redTextColor = "#9F1239"
-orangeColor = "#C2410C"
-yellowColor = "#B45309"
-blueColor = "#1D4ED8"
-violetColor = "#6D28D9"
+orangeColor = "#EA580C"
+yellowColor = "#CA8A04"
+blueColor = "#2563EB"
+violetColor = "#7C3AED"
 grayColor = "#64748B"
 
-[theme.light.sidebar]
-backgroundColor = "#0F172A"
-secondaryBackgroundColor = "#1E293B"
-codeBackgroundColor = "#1E293B"
-textColor = "#E2E8F0"
-borderColor = "#1E293B"
-primaryColor = "#818CF8"
-linkColor = "#A5B4FC"
+chartCategoricalColors = [
+    "#2563EB",
+    "#0EA5E9",
+    "#EA580C",
+    "#E11D48",
+    "#7C3AED",
+    "#CA8A04",
+    "#0891B2",
+    "#DB2777",
+]
+chartSequentialColors = [
+    "#EFF6FF",
+    "#DBEAFE",
+    "#BFDBFE",
+    "#93C5FD",
+    "#60A5FA",
+    "#3B82F6",
+    "#2563EB",
+    "#1D4ED8",
+    "#1E40AF",
+    "#1E3A8A",
+]
 
-[theme.dark]
-primaryColor = "#818CF8"
-backgroundColor = "#0B1120"
-secondaryBackgroundColor = "#151E32"
-textColor = "#E6EDF7"
-linkColor = "#A5B4FC"
-borderColor = "#23304B"
-codeBackgroundColor = "#151E32"
-codeTextColor = "#CBD5E1"
-dataframeBorderColor = "#23304B"
-dataframeHeaderBackgroundColor = "#151E32"
-greenColor = "#34D399"
-redColor = "#FB7185"
-orangeColor = "#FB923C"
-yellowColor = "#FBBF24"
-blueColor = "#60A5FA"
-violetColor = "#A78BFA"
-grayColor = "#94A3B8"
-
-[theme.dark.sidebar]
-backgroundColor = "#070C17"
-secondaryBackgroundColor = "#151E32"
-codeBackgroundColor = "#151E32"
-textColor = "#E6EDF7"
-borderColor = "#1B2540"
-primaryColor = "#818CF8"
+[theme.sidebar]
+backgroundColor = "#EFF6FF"
+secondaryBackgroundColor = "#FFFFFF"
+codeBackgroundColor = "#DBEAFE"
+textColor = "#1E293B"
+borderColor = "#93C5FD"
+primaryColor = "#2563EB"
+linkColor = "#1D4ED8"

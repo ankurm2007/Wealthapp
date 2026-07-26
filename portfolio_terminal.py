@@ -11,23 +11,49 @@ import streamlit as st
 
 import stock_analyzer as san
 
-OPENBB_AVAILABLE = False
 _obb = None
+_OPENBB_TRIED = False
 _OPENBB_IMPORT_ERROR: str | None = None
 
-try:
-    from openbb import obb as _obb
 
-    OPENBB_AVAILABLE = True
-except ImportError:
-    _OPENBB_IMPORT_ERROR = "OpenBB is not installed."
-except (PermissionError, OSError) as exc:
-    _OPENBB_IMPORT_ERROR = (
-        "OpenBB cannot run in this environment (read-only filesystem). "
-        "Install and use it locally instead."
-    )
-except Exception as exc:
-    _OPENBB_IMPORT_ERROR = f"OpenBB failed to load: {exc}"
+def _ensure_openbb() -> bool:
+    """Lazy-load OpenBB so app startup is not blocked by a heavy import."""
+    global _obb, _OPENBB_TRIED, _OPENBB_IMPORT_ERROR
+    if _OPENBB_TRIED:
+        return _obb is not None
+    _OPENBB_TRIED = True
+    try:
+        from openbb import obb as obb_mod
+
+        _obb = obb_mod
+        return True
+    except ImportError:
+        _OPENBB_IMPORT_ERROR = "OpenBB is not installed."
+    except (PermissionError, OSError):
+        _OPENBB_IMPORT_ERROR = (
+            "OpenBB cannot run in this environment (read-only filesystem). "
+            "Install and use it locally instead."
+        )
+    except Exception as exc:
+        _OPENBB_IMPORT_ERROR = f"OpenBB failed to load: {exc}"
+    _obb = None
+    return False
+
+
+def is_available() -> bool:
+    return _ensure_openbb()
+
+
+def unavailability_reason() -> str:
+    _ensure_openbb()
+    if _obb is not None:
+        return ""
+    if _OPENBB_IMPORT_ERROR:
+        return _OPENBB_IMPORT_ERROR
+    return "OpenBB is not installed."
+
+
+OPENBB_AVAILABLE = False  # legacy alias; prefer is_available()
 
 
 @dataclass
@@ -82,18 +108,6 @@ NON_EQUITY_ASSET_TYPES = frozenset(
 )
 
 
-def is_available() -> bool:
-    return OPENBB_AVAILABLE
-
-
-def unavailability_reason() -> str:
-    if OPENBB_AVAILABLE:
-        return ""
-    if _OPENBB_IMPORT_ERROR:
-        return _OPENBB_IMPORT_ERROR
-    return "OpenBB is not installed."
-
-
 def _yahoo_symbol(symbol: str) -> str:
     return san.to_yahoo_ticker(symbol)
 
@@ -108,7 +122,7 @@ def _safe_float(value: Any) -> float | None:
 
 
 def fetch_metrics(symbol: str) -> TerminalMetrics | None:
-    if not OPENBB_AVAILABLE or _obb is None:
+    if not _ensure_openbb():
         return None
     yahoo = _yahoo_symbol(symbol)
     try:
@@ -140,7 +154,7 @@ def fetch_metrics(symbol: str) -> TerminalMetrics | None:
 
 
 def fetch_profile(symbol: str) -> dict:
-    if not OPENBB_AVAILABLE or _obb is None:
+    if not _ensure_openbb():
         return {}
     try:
         out = _obb.equity.profile(_yahoo_symbol(symbol), provider="yfinance")
@@ -161,7 +175,7 @@ def fetch_profile(symbol: str) -> dict:
 
 def fetch_market_pulse() -> dict:
     """Nifty 50 index snapshot for macro context."""
-    if not OPENBB_AVAILABLE or _obb is None:
+    if not _ensure_openbb():
         return {}
     try:
         out = _obb.equity.price.quote("^NSEI", provider="yfinance")
@@ -181,7 +195,7 @@ def fetch_market_pulse() -> dict:
 
 
 def fetch_news_headlines(symbol: str, limit: int = 3) -> list[str]:
-    if not OPENBB_AVAILABLE or _obb is None:
+    if not _ensure_openbb():
         return []
     try:
         out = _obb.news.company(symbol, provider="yfinance", limit=limit)
@@ -215,7 +229,7 @@ def _rsi_wilder(close: pd.Series, period: int = 14) -> float | None:
 
 def _close_series_from_openbb(yahoo: str, lookback_days: int = 120) -> pd.Series | None:
     """Pull daily closes via OpenBB equity.price.historical (yfinance provider)."""
-    if not OPENBB_AVAILABLE or _obb is None:
+    if not _ensure_openbb():
         return None
     try:
         end = pd.Timestamp.today().normalize()
@@ -353,7 +367,7 @@ def enrich_symbols_technicals(
             warnings.append(f"{row.symbol}: {row.error}")
 
     ok = sum(1 for m in metrics if m.get("rsi_14") is not None or m.get("sma_50") is not None)
-    if ok == 0 and not OPENBB_AVAILABLE:
+    if ok == 0 and not _ensure_openbb():
         warnings.append(unavailability_reason() or "OpenBB unavailable; Yahoo fallback also failed.")
 
     return {
@@ -367,7 +381,7 @@ def enrich_symbols_technicals(
 @st.cache_data(ttl="4h", show_spinner=False)
 def build_terminal_snapshot(symbols: tuple[str, ...], news_for: tuple[str, ...]) -> dict:
     """Fetch OpenBB metrics for holdings + market pulse + news."""
-    if not OPENBB_AVAILABLE:
+    if not _ensure_openbb():
         return {"available": False, "metrics": [], "pulse": {}, "news": {}}
 
     metrics: list[dict] = []

@@ -349,37 +349,36 @@ def wealth_trend_series(column: str = "total_current", points: int = 12) -> list
 
 
 def render_portfolio_ai_engine(portfolio_df: pd.DataFrame) -> None:
-    """Interactive trigger for the modular Portfolio Analysis Engine."""
+    """Interactive trigger for the modular Portfolio Analysis Engine (Insights)."""
     pui.section(
-        "AI portfolio engine",
-        "OpenBB technicals + Groq/Gemini quantitative memo",
-        icon="psychology",
+        "Portfolio scorecard",
+        "Objective health and risk scores from your holdings, plus drivers, risks, and suggested actions",
     )
     keys = resolve_agent_api_keys()
     openai_key = get_secret("openai.api_key")
     has_ai = bool(keys.get("gemini") or keys.get("xai") or keys.get("groq") or openai_key)
 
     st.caption(
-        "Objective scorecard from your holdings + OpenBB technicals, then structured LLM JSON "
-        "(drivers · risks · actions) — not an essay."
+        "Price technicals are fetched via OpenBB (Yahoo Finance fallback). "
+        "An AI model fills the driver, risk, and action tables below the scores."
     )
 
     if not has_ai:
         st.info(
             "Add `GROQ_API_KEY` / `GEMINI_API_KEY` (or `[groq]` / `[gemini]` in secrets) "
-            "to run the analysis engine."
+            "to generate the written scorecard sections."
         )
         return
 
     run = st.button(
-        "Analyze current portfolio",
+        "Generate scorecard",
         type="primary",
-        icon=":material/auto_awesome:",
+        icon=":material/analytics:",
         width="stretch",
         key="run_portfolio_ai_engine",
     )
     if run:
-        with st.spinner("Enriching holdings and generating quantitative analysis..."):
+        with st.spinner("Fetching technicals and generating the scorecard..."):
             result = pai.analyze_portfolio_engine(
                 portfolio_df,
                 gemini_key=keys.get("gemini") or "",
@@ -396,60 +395,235 @@ def render_portfolio_ai_engine(portfolio_df: pd.DataFrame) -> None:
         )
 
 
+def render_decision_snapshot(portfolio_df: pd.DataFrame, summary: dict) -> None:
+    """Dense, decision-oriented portfolio snapshot for the Portfolio page."""
+    total_current = float(summary.get("total_current") or 0)
+    total_invested = float(summary.get("total_invested") or 0)
+    pl = float(summary.get("pl_amount") or 0)
+    ret = (pl / total_invested * 100) if total_invested else 0.0
+
+    merged = pan.merge_holdings(portfolio_df, total_current)
+    metrics = pan.compute_metrics(merged, summary)
+
+    winners = int((portfolio_df["P&L"] > 0).sum())
+    losers = int((portfolio_df["P&L"] < 0).sum())
+    flat = int((portfolio_df["P&L"] == 0).sum())
+    n = len(portfolio_df)
+    profit_share = (winners / n * 100) if n else 0.0
+
+    best = portfolio_df.loc[portfolio_df["Return %"].idxmax()]
+    worst = portfolio_df.loc[portfolio_df["Return %"].idxmin()]
+    largest = portfolio_df.loc[portfolio_df["Current Value"].idxmax()]
+    largest_weight = float(metrics.get("largest_weight") or 0)
+    top3 = float(metrics.get("top3_weight") or 0)
+    concentration = metrics.get("concentration_label") or "—"
+
+    by_pnl = portfolio_df.sort_values("P&L")
+    top_drags = by_pnl.head(5)
+
+    trend = wealth_trend_series("total_current")
+    pl_trend = wealth_trend_series("pl_amount")
+
+    pui.section(
+        "Decision snapshot",
+        "Capital, concentration, and the holdings that most affect portfolio P&L",
+    )
+
+    # --- Capital ---
+    st.markdown("**Capital position**")
+    with st.container(horizontal=True):
+        st.metric(
+            "Total invested",
+            pui.format_inr_compact(total_invested),
+            help="Sum of buy value across all holdings",
+            border=True,
+        )
+        st.metric(
+            "Current value",
+            pui.format_inr_compact(total_current),
+            help="Current market value of all holdings",
+            border=True,
+            chart_data=trend,
+            chart_type="area",
+        )
+        st.metric(
+            "Unrealised P&L",
+            pui.format_inr_compact(pl),
+            pui.format_pct(ret),
+            help="Current value minus invested capital",
+            border=True,
+            chart_data=pl_trend,
+            chart_type="bar",
+        )
+        st.metric(
+            "Holdings",
+            str(n),
+            f"{len(portfolio_df['Owner'].unique())} brokers",
+            delta_color="off",
+            border=True,
+        )
+
+    # --- Structure ---
+    st.markdown("**Portfolio structure**")
+    with st.container(horizontal=True):
+        st.metric(
+            "Largest holding",
+            str(largest["Symbol"]),
+            f"{largest_weight:.1f}% of portfolio",
+            delta_color="off",
+            help="Stock with the highest current market value",
+            border=True,
+        )
+        st.metric(
+            "Top 3 weight",
+            f"{top3:.1f}%",
+            f"Concentration: {concentration}",
+            delta_color="off",
+            help="Combined portfolio weight of the three largest holdings",
+            border=True,
+        )
+        st.metric(
+            "Holdings in profit",
+            str(winners),
+            f"{profit_share:.0f}% of holdings",
+            delta_color="normal" if profit_share >= 50 else "inverse",
+            delta_arrow="off",
+            help="Number of holdings with positive unrealised P&L",
+            border=True,
+        )
+        st.metric(
+            "Holdings at a loss",
+            str(losers),
+            f"{flat} flat" if flat else f"{100 - profit_share:.0f}% of holdings",
+            delta_color="off",
+            help="Number of holdings with negative unrealised P&L",
+            border=True,
+        )
+
+    # --- Alerts (full width, compact) ---
+    st.markdown("**Priority alerts**")
+    st.caption("Concentration and drawdown flags — review these before making changes")
+    flags: list[str] = []
+    if largest_weight >= 20:
+        flags.append(
+            f":red-badge[High concentration] **{largest['Symbol']}** is "
+            f"**{largest_weight:.1f}%** of the portfolio (above 20%)."
+        )
+    elif largest_weight >= 15:
+        flags.append(
+            f":orange-badge[Watch concentration] **{largest['Symbol']}** is "
+            f"**{largest_weight:.1f}%** of the portfolio (above 15%)."
+        )
+    if top3 >= 50:
+        flags.append(
+            f":orange-badge[Top-heavy] Top 3 holdings are **{top3:.1f}%** of portfolio value."
+        )
+    if profit_share < 40 and n >= 5:
+        flags.append(
+            f":orange-badge[Weak breadth] Only **{profit_share:.0f}%** of holdings are in profit "
+            f"({winners} of {n})."
+        )
+    if float(worst["Return %"]) <= -25:
+        flags.append(
+            f":red-badge[Deep drawdown] **{worst['Symbol']}** is "
+            f"**{pui.format_pct(float(worst['Return %']))}** unrealised."
+        )
+    if not flags:
+        flags.append(
+            ":green-badge[No alerts] No concentration or drawdown flags from current holdings."
+        )
+    with st.container(border=True):
+        for flag in flags:
+            st.markdown(f"- {flag}")
+
+    # --- Performance extremes (aligned 3-column tables) ---
+    st.markdown("**Performance extremes**")
+    st.caption("Largest unrealised losses and strongest / weakest returns by holding")
+
+    wmap = (
+        merged.drop_duplicates("Symbol").set_index("Symbol")["Weight %"]
+        if not merged.empty and "Weight %" in merged.columns
+        else pd.Series(dtype=float)
+    )
+
+    def _weight_for(symbol: str) -> float:
+        try:
+            return float(wmap.loc[symbol])
+        except Exception:
+            return 0.0
+
+    hi_col, lo_col = st.columns(2, gap="medium")
+    with hi_col:
+        with st.container(border=True):
+            st.caption("Highest return")
+            st.markdown(
+                f"**{best['Symbol']}** &nbsp;"
+                f"{pui.tone_badge(float(best['Return %']), pui.format_pct(float(best['Return %'])))}"
+            )
+            with st.container(horizontal=True):
+                st.metric("Portfolio weight", f"{_weight_for(str(best['Symbol'])):.1f}%")
+                st.metric("Unrealised P&L", pui.format_inr_compact(float(best["P&L"])))
+    with lo_col:
+        with st.container(border=True):
+            st.caption("Lowest return")
+            st.markdown(
+                f"**{worst['Symbol']}** &nbsp;"
+                f"{pui.tone_badge(float(worst['Return %']), pui.format_pct(float(worst['Return %'])))}"
+            )
+            with st.container(horizontal=True):
+                st.metric("Portfolio weight", f"{_weight_for(str(worst['Symbol'])):.1f}%")
+                st.metric("Unrealised P&L", pui.format_inr_compact(float(worst["P&L"])))
+
+    mover_cfg = {
+        "Symbol": st.column_config.TextColumn("Stock"),
+        "Invested": st.column_config.TextColumn("Invested"),
+        "P&L": st.column_config.TextColumn("P&L"),
+        "Return %": st.column_config.NumberColumn("Return", format="%+.1f%%"),
+        "Weight %": st.column_config.NumberColumn("Weight", format="%.1f%%"),
+    }
+
+    def _mover_table(source: pd.DataFrame) -> pd.DataFrame:
+        out = source[["Symbol", "Invested Value", "P&L", "Return %"]].copy()
+        out["Invested"] = out["Invested Value"].map(
+            lambda v: pui.format_inr_compact(float(v)) if pd.notna(v) else "—"
+        )
+        out["P&L"] = out["P&L"].map(
+            lambda v: pui.format_inr_compact(float(v)) if pd.notna(v) else "—"
+        )
+        out["Weight %"] = out["Symbol"].map(wmap)
+        return out[["Symbol", "Invested", "P&L", "Return %", "Weight %"]]
+
+    show_drags = _mover_table(top_drags)
+    gain_df = _mover_table(portfolio_df.nlargest(5, "Return %"))
+    loss_df = _mover_table(portfolio_df.nsmallest(5, "Return %"))
+
+    col_loss, col_gain, col_weak = st.columns(3, gap="medium")
+    with col_loss:
+        with st.container(border=True, height="stretch"):
+            st.markdown("**Largest unrealised losses**")
+            st.dataframe(show_drags, hide_index=True, column_config=mover_cfg)
+    with col_gain:
+        with st.container(border=True, height="stretch"):
+            st.markdown("**Highest returns**")
+            st.dataframe(gain_df, hide_index=True, column_config=mover_cfg)
+    with col_weak:
+        with st.container(border=True, height="stretch"):
+            st.markdown("**Lowest returns**")
+            st.dataframe(loss_df, hide_index=True, column_config=mover_cfg)
+
+    st.caption(
+        "Next: **Insights → Scorecard** for full risk analysis · "
+        "**Research → Fundamentals** before changing a large position."
+    )
+
+
 def render_portfolio_tab(portfolio_df: pd.DataFrame, summary: dict) -> None:
     if portfolio_df.empty:
         return
 
-    winners = int((portfolio_df["P&L"] > 0).sum())
-    losers = int((portfolio_df["P&L"] < 0).sum())
-    best = portfolio_df.loc[portfolio_df["Return %"].idxmax()]
-    worst = portfolio_df.loc[portfolio_df["Return %"].idxmin()]
-    largest = portfolio_df.loc[portfolio_df["Current Value"].idxmax()]
-    largest_weight = (
-        largest["Current Value"] / summary["total_current"] * 100 if summary["total_current"] else 0
-    )
-    trend = wealth_trend_series("total_current")
+    render_decision_snapshot(portfolio_df, summary)
 
-    cards: list[dict] = [
-        {
-            "label": "Best performer",
-            "value": str(best["Symbol"]),
-            "delta": pui.format_pct(float(best["Return %"])),
-        },
-        {
-            "label": "Weakest holding",
-            "value": str(worst["Symbol"]),
-            "delta": pui.format_pct(float(worst["Return %"])),
-        },
-        {
-            "label": "Largest position",
-            "value": str(largest["Symbol"]),
-            "delta": f"{largest_weight:.1f}% of portfolio",
-            "delta_color": "off",
-        },
-        {
-            "label": "Winners vs losers",
-            "value": f"{winners} up · {losers} down",
-            "delta": f"{winners / len(portfolio_df) * 100:.0f}% in profit",
-            "delta_color": "off",
-        },
-    ]
-    if trend:
-        cards.append(
-            {
-                "label": "Wealth trend",
-                "value": pui.format_inr_compact(trend[-1]),
-                "delta": f"last {len(trend)} snapshots",
-                "delta_color": "off",
-                "chart": trend,
-                "chart_type": "area",
-            }
-        )
-    pui.kpi_row(cards)
-
-    render_portfolio_ai_engine(portfolio_df)
-
-    pui.section("Platform breakdown", "Invested vs current by broker", icon="pie_chart")
+    pui.section("Value by broker", "Invested capital and current market value on each platform")
     platforms = list(portfolio_df["Owner"].unique())
     plat_cols = st.columns(min(len(platforms), 2) or 1)
     for idx, platform in enumerate(platforms):
@@ -462,51 +636,99 @@ def render_portfolio_tab(portfolio_df: pd.DataFrame, summary: dict) -> None:
         with plat_cols[idx % len(plat_cols)]:
             with st.container(border=True, height="stretch"):
                 st.markdown(
-                    f"**:material/store: {platform}** &nbsp;"
-                    f"{pui.tone_badge(plat_ret, pui.format_pct(plat_ret))}"
+                    f"**{platform}** &nbsp;{pui.tone_badge(plat_ret, pui.format_pct(plat_ret))}"
                 )
                 with st.container(horizontal=True):
-                    st.metric("Invested", pui.format_inr_compact(plat_invested), border=True)
+                    st.metric("Total invested", pui.format_inr_compact(plat_invested))
                     st.metric(
-                        "Current",
+                        "Current value",
                         pui.format_inr_compact(plat_current),
                         pui.format_inr_compact(plat_pl),
-                        border=True,
                     )
-                st.caption(f"{len(plat_df)} holdings · {share:.0f}% of portfolio")
+                st.caption(f"{len(plat_df)} holdings · {share:.0f}% of total portfolio value")
 
-    pui.section("Holdings", "Sorted by current value · weight bar shows size", icon="table_chart")
+    pui.section("All holdings", "Sorted by current market value — filter by broker or stock symbol")
     table = portfolio_df.copy()
     total_value = table["Current Value"].sum()
     table["Weight %"] = table["Current Value"] / total_value * 100 if total_value else 0
     table = table.sort_values("Current Value", ascending=False)
-    display_cols = [
-        "Symbol",
-        "Owner",
-        "Weight %",
-        "Quantity",
-        "Buy Price",
-        "Current Price",
-        "Invested Value",
-        "Current Value",
-        "P&L",
-        "Return %",
-    ]
+
+    platform_options = ["All brokers", *platforms]
+    filt_left, filt_right = st.columns([2, 1], vertical_alignment="bottom")
+    with filt_left:
+        platform_pick = st.pills(
+            "Broker",
+            platform_options,
+            default="All brokers",
+            key="portfolio_platform_filter",
+        )
+    with filt_right:
+        search = st.text_input(
+            "Search stock symbol",
+            placeholder="e.g. RELIANCE",
+            key="portfolio_symbol_search",
+        )
+    if platform_pick and platform_pick != "All brokers":
+        table = table[table["Owner"] == platform_pick]
+    if search and search.strip():
+        q = search.strip().upper()
+        table = table[table["Symbol"].astype(str).str.upper().str.contains(q, na=False)]
+
+    display = table[
+        [
+            "Symbol",
+            "Owner",
+            "Quantity",
+            "Buy Price",
+            "Current Price",
+            "Invested Value",
+            "Current Value",
+            "P&L",
+            "Return %",
+            "Weight %",
+        ]
+    ].copy()
+    display["Invested"] = display["Invested Value"].map(
+        lambda v: pui.format_inr_compact(float(v)) if pd.notna(v) else "—"
+    )
+    display["Current"] = display["Current Value"].map(
+        lambda v: pui.format_inr_compact(float(v)) if pd.notna(v) else "—"
+    )
+    display["P&L display"] = display["P&L"].map(
+        lambda v: pui.format_inr_compact(float(v)) if pd.notna(v) else "—"
+    )
+    display = display[
+        [
+            "Symbol",
+            "Owner",
+            "Quantity",
+            "Buy Price",
+            "Current Price",
+            "Invested",
+            "Current",
+            "P&L display",
+            "Return %",
+            "Weight %",
+        ]
+    ].rename(columns={"P&L display": "P&L"})
+    st.caption(f"Showing {len(display)} of {len(portfolio_df)} holdings · amounts in ₹ / L / Cr")
     with st.container(border=True):
         st.dataframe(
-            table[display_cols],
+            display,
             hide_index=True,
+            height=min(520, 48 + 36 * max(len(display), 4)),
             column_config={
                 "Symbol": st.column_config.TextColumn(pinned=True),
+                "Owner": st.column_config.TextColumn("Platform"),
                 "Weight %": st.column_config.ProgressColumn(
                     "Weight",
                     format="%.1f%%",
                     min_value=0,
-                    max_value=float(max(table["Weight %"].max(), 1)),
+                    max_value=float(max(table["Weight %"].max() if len(table) else 1, 1)),
                 ),
-                "Invested Value": st.column_config.NumberColumn("Invested", format="₹%d"),
-                "Current Value": st.column_config.NumberColumn("Current", format="₹%d"),
-                "P&L": st.column_config.NumberColumn(format="₹%d"),
+                "Invested": st.column_config.TextColumn("Invested"),
+                "Current": st.column_config.TextColumn("Current"),
+                "P&L": st.column_config.TextColumn("P&L"),
                 "Return %": st.column_config.NumberColumn("Return", format="%+.1f%%"),
                 "Buy Price": st.column_config.NumberColumn("Avg buy", format="₹%.2f"),
                 "Current Price": st.column_config.NumberColumn("LTP", format="₹%.2f"),
@@ -523,10 +745,14 @@ def render_trends_tab() -> None:
     history = ph.load_snapshots()
     if history.empty:
         pui.empty_state(
-            "No snapshots yet",
-            "Save your first snapshot after calculating live wealth.",
+            "No snapshots saved yet",
+            "This page charts portfolio value over time from the snapshots you save.",
             icon="photo_camera",
-            hint="Use **Save today's snapshot** in the sidebar. Weekly saves give the best trend lines.",
+            steps=[
+                "Refresh your portfolio from the sidebar",
+                "Click **Save today's snapshot**",
+                "Repeat weekly to build a clear trend line",
+            ],
         )
         return
 
@@ -542,20 +768,22 @@ def render_trends_tab() -> None:
     pui.kpi_row(
         [
             {
-                "label": "Latest value",
+                "label": "Latest portfolio value",
                 "value": pui.format_inr(latest_value),
                 "delta": pui.format_pct(since_start) + " since first snapshot",
                 "chart": trend if len(trend) >= 3 else None,
                 "chart_type": "area",
+                "help": "Total market value from your most recent saved snapshot",
             },
             {
                 "label": "Snapshots saved",
                 "value": str(len(history)),
                 "delta": f"since {history['date'].min().strftime('%d %b %Y')}",
                 "delta_color": "off",
+                "help": "Number of portfolio snapshots stored for trend charts",
             },
             {
-                "label": "Last saved",
+                "label": "Last snapshot date",
                 "value": last_saved.strftime("%d %b"),
                 "delta": f"{days_since} days ago",
                 "delta_color": "inverse" if days_since > 7 else "off",
@@ -567,17 +795,18 @@ def render_trends_tab() -> None:
                 if len(history) >= 3
                 else None,
                 "chart_type": "bar",
+                "help": "Unrealised profit or loss from the latest snapshot",
             },
         ]
     )
 
     if days_since > 7:
         pui.status_banner(
-            "Last snapshot is over 7 days old — save a fresh one for accurate trends.",
+            "Your last snapshot is more than 7 days old. Save a new one for up-to-date trends.",
             kind="warning",
         )
 
-    pui.section("Wealth over time", "Invested base vs live market value", icon="show_chart")
+    pui.section("Portfolio value over time", "Total invested capital vs current market value at each snapshot")
     value_chart_df = history.set_index("date")[["total_invested", "total_current"]].rename(
         columns={"total_invested": "Invested", "total_current": "Current value"}
     )
@@ -589,12 +818,15 @@ def render_trends_tab() -> None:
         )
 
     if len(monthly) >= 2:
-        pui.section("Monthly growth", "Change in portfolio value month over month", icon="bar_chart")
+        pui.section(
+            "Monthly change",
+            "Portfolio value change between consecutive month-end snapshots",
+        )
         growth_col1, growth_col2 = st.columns(2)
         with growth_col1:
             with st.container(border=True, height="stretch"):
-                st.markdown("**Monthly change**")
-                st.caption("Rupee movement between month-end snapshots")
+                st.markdown("**Change in rupees**")
+                st.caption("Absolute ₹ change from the previous month-end")
                 change_df = (
                     monthly.set_index("date")[["monthly_change"]]
                     .dropna()
@@ -603,8 +835,8 @@ def render_trends_tab() -> None:
                 st.bar_chart(change_df, color=colors["change"])
         with growth_col2:
             with st.container(border=True, height="stretch"):
-                st.markdown("**Monthly growth**")
-                st.caption("Percentage change between month-end snapshots")
+                st.markdown("**Change in percent**")
+                st.caption("Percentage change from the previous month-end")
                 pct_df = (
                     monthly.set_index("date")[["monthly_growth_pct"]]
                     .dropna()
@@ -612,17 +844,17 @@ def render_trends_tab() -> None:
                 )
                 st.bar_chart(pct_df, color=colors["growth"])
     else:
-        st.caption("Save snapshots across at least two months to unlock monthly growth charts.")
+        st.caption("Save snapshots in at least two different months to unlock monthly change charts.")
 
     if "zerodha_current" in history.columns and history[["zerodha_current", "groww_current"]].sum().sum() > 0:
-        pui.section("Platform split over time", "Zerodha vs Groww contribution", icon="stacked_line_chart")
+        pui.section("Value by broker over time", "Zerodha vs Groww market value at each snapshot")
         platform_df = history.set_index("date")[["zerodha_current", "groww_current"]].rename(
             columns={"zerodha_current": "Zerodha", "groww_current": "Groww"}
         )
         with st.container(border=True):
             st.area_chart(platform_df, color=[colors["groww"], colors["zerodha"]])
 
-    pui.section("Snapshot log", "Every saved point, newest first", icon="history")
+    pui.section("Snapshot history", "Every saved portfolio snapshot, newest first")
     display_history = history.sort_values("date", ascending=False).copy()
     with st.container(border=True):
         st.dataframe(
@@ -655,9 +887,12 @@ def analysis_extras() -> dict:
 
 
 def render_portfolio_risk_section(merged: pd.DataFrame) -> None:
-    pui.section("Portfolio risk", "Beta, Sharpe, and correlation vs Nifty", icon="speed")
+    pui.section(
+        "Portfolio risk metrics",
+        "Beta vs Nifty 50, Sharpe ratio, annualised return, and volatility from price history",
+    )
 
-    load_risk = st.button("Compute risk metrics", key="load_risk_metrics")
+    load_risk = st.button("Calculate risk metrics", key="load_risk_metrics")
     if load_risk:
         prisk.fetch_daily_returns.clear()
 
@@ -667,7 +902,7 @@ def render_portfolio_risk_section(merged: pd.DataFrame) -> None:
                 st.session_state.risk_snapshot = prisk.compute_portfolio_risk(merged)
         risk = st.session_state.risk_snapshot
     else:
-        st.info("Click **Compute risk metrics** to load beta, Sharpe, and correlation data.")
+        st.info("Click **Calculate risk metrics** to load beta, Sharpe ratio, and correlation data.")
         return
 
     if not risk or not risk.get("ok"):
@@ -721,16 +956,19 @@ def render_portfolio_risk_section(merged: pd.DataFrame) -> None:
 
 
 def render_forensic_section(merged: pd.DataFrame, enriched: pd.DataFrame | None) -> list[dict]:
-    pui.section("Forensic checks", "Leverage, cash flow quality, and FMP scores", icon="fact_check")
-    st.caption("D/E leverage, FMP Piotroski F-Score, and operating cash flow vs reported profit.")
+    pui.section(
+        "Earnings quality checks",
+        "Debt-to-equity, Piotroski F-Score, and operating cash flow vs reported profit",
+    )
+    st.caption("Uses Financial Modeling Prep (FMP) data when an API key is configured.")
 
     fmp_key = get_fmp_api_key()
     if not fmp_key:
         st.info("Add `[fmp] api_key` in `.streamlit/secrets.toml` to enable Piotroski and OCF checks.")
     else:
-        st.caption("FMP key detected — load forensic data for your holdings.")
+        st.caption("FMP key found — load scores for your holdings.")
 
-    load_forensic = st.button("Load forensic data", key="load_forensic_data")
+    load_forensic = st.button("Load earnings quality data", key="load_forensic_data")
     if load_forensic:
         pforensic.fetch_forensic_snapshot.clear()
 
@@ -745,13 +983,16 @@ def render_forensic_section(merged: pd.DataFrame, enriched: pd.DataFrame | None)
     if not checks and not fmp_key:
         return []
     if not load_forensic and not fmp_snapshot and fmp_key:
-        st.caption("Click **Load forensic data** to run Piotroski and earnings-quality checks.")
+        st.caption("Click **Load earnings quality data** to run Piotroski and cash-flow checks.")
     return checks
 
 
 def render_screener_upload(merged: pd.DataFrame) -> list[dict]:
-    pui.section("Institutional data", "Upload Screener.in or Trendlyne exports", icon="upload_file")
-    st.caption("Upload a Screener.in or Trendlyne export (CSV/XLSX) for promoter pledge, FII/DII, and shareholding checks.")
+    pui.section(
+        "Shareholding data import",
+        "Upload a Screener.in or Trendlyne export for promoter, pledge, and FII/DII checks",
+    )
+    st.caption("CSV or XLSX files are matched to stock symbols in your portfolio.")
 
     uploaded = st.file_uploader(
         "Screener / Trendlyne export",
@@ -787,8 +1028,11 @@ def render_transcript_auditor(
     keys: dict,
     openai_key: str,
 ) -> None:
-    pui.section("Transcript auditor", "Forensic read on earnings call text", icon="record_voice_over")
-    st.caption("Paste or upload an earnings call transcript — AI flags guidance gaps, tone, and red flags.")
+    pui.section(
+        "Earnings call review",
+        "Paste a quarterly earnings transcript to flag tone shifts, guidance gaps, and risk language",
+    )
+    st.caption("Works best with a full earnings call transcript, not a short press release.")
 
     has_ai = bool(keys.get("gemini") or keys.get("xai") or keys.get("groq") or openai_key)
     with st.container(border=True):
@@ -851,21 +1095,7 @@ def render_transcript_auditor(
 
 
 def render_research_brief(brief: dict) -> None:
-    health = brief.get("health", "mixed")
-    health_badge = {
-        "healthy": ":green-badge[Healthy]",
-        "mixed": ":orange-badge[Mixed]",
-        "needs attention": ":red-badge[Watch]",
-    }.get(health, ":blue-badge[Overview]")
-
-    with st.container(border=True):
-        st.markdown(f"#### :material/lightbulb: At a glance · {health_badge}")
-        st.markdown(f"**{brief['headline']}**")
-        st.space("small")
-        for item in brief.get("takeaways", []):
-            with st.container(border=True):
-                st.markdown(f"**{item['title']}**")
-                st.caption(item["body"])
+    pui.render_diagnosis_brief(brief)
 
 
 def render_portfolio_checks(checks: list[dict]) -> None:
@@ -873,7 +1103,10 @@ def render_portfolio_checks(checks: list[dict]) -> None:
     total = len(checks)
     health_score = round((summary["pass"] / total) * 100) if total else 0
 
-    pui.section("Portfolio checks", "Risk and health signals", icon="health_and_safety")
+    pui.section(
+        "Portfolio health checks",
+        "Rule-based alerts for concentration, drawdowns, and other portfolio-level risks",
+    )
 
     with st.container(border=True):
         with st.container(horizontal=True):
@@ -887,7 +1120,7 @@ def render_portfolio_checks(checks: list[dict]) -> None:
         pass_checks = [c for c in checks if c["status"] == "pass"]
 
         if fail_checks:
-            st.markdown("**:red[Needs attention]**")
+            st.markdown("**Needs attention**")
             for check in fail_checks:
                 with st.container(border=True):
                     title = presearch.CHECK_TITLES.get(check["name"], check["name"])
@@ -899,7 +1132,7 @@ def render_portfolio_checks(checks: list[dict]) -> None:
                         st.dataframe(check["table"], width="stretch", hide_index=True)
 
         if warn_checks:
-            st.markdown("**:orange[Watchlist]**")
+            st.markdown("**Watch closely**")
             cols = st.columns(2)
             for idx, check in enumerate(warn_checks):
                 with cols[idx % 2]:
@@ -918,12 +1151,11 @@ def render_portfolio_checks(checks: list[dict]) -> None:
 
 def render_sector_section(enriched: pd.DataFrame, sector_df: pd.DataFrame, coverage: dict) -> None:
     pui.section(
-        "Sector exposure",
+        "Sectors",
         (
-            f"Yahoo sectors · mapped {coverage['sector_mapped']}/{coverage['total']} "
+            f"Mapped {coverage['sector_mapped']}/{coverage['total']} "
             f"({coverage['sector_mapped_pct']}%) · prices {coverage['found']}/{coverage['total']}"
         ),
-        icon="category",
     )
 
     if coverage["unknown_sector_symbols"]:
@@ -973,8 +1205,8 @@ def render_sector_section(enriched: pd.DataFrame, sector_df: pd.DataFrame, cover
 
 
 def render_stock_info_table(enriched: pd.DataFrame, coverage: dict) -> None:
-    pui.section("Stock information", icon="info")
-    st.caption("Live reference data from Yahoo Finance for each holding in your portfolio.")
+    pui.section("Holding reference data")
+    st.caption("Company, sector, valuation, and 52-week range from Yahoo Finance for each holding.")
 
     display = enriched[
         [
@@ -1067,296 +1299,313 @@ def render_insights_analysis(
         merged, summary, metrics, checks, sector_df, benchmark=benchmark
     )
 
-    pui.section("Overview", "Key numbers and research brief", icon="analytics")
-
-    with st.container(horizontal=True):
-        st.metric(
-            "Portfolio value",
-            f"₹{summary['total_current']:,.0f}",
-            f"{metrics['overall_return_pct']:+.1f}%",
-            border=True,
-        )
-        st.metric(
-            "Total P&L",
-            f"₹{summary['pl_amount']:,.0f}",
-            f"{metrics['in_profit']} up / {metrics['in_loss']} down",
-            border=True,
-        )
-        st.metric(
-            "Top 3 weight",
-            f"{metrics['top3_weight']:.1f}%",
-            metrics["concentration_label"],
-            border=True,
-        )
-        st.metric(
-            "Holdings",
-            metrics["holding_count"],
-            f"HHI {metrics['hhi']:.3f}",
-            border=True,
-        )
-
-    st.space("small")
-    render_research_brief(brief)
-
-    with st.container(border=True):
-        st.markdown("**:material/auto_awesome: AI deep dive**")
-        st.caption("Open **Insights → Research chat** for briefing, holding research, and agent Q&A.")
-
-    pui.section("Allocation", "Stock weights, sectors, and concentration", icon="pie_chart")
-
-    stock_tab, sector_tab = st.tabs(["By stock", "By sector"])
-
-    with stock_tab:
-        stock_left, stock_right = st.columns([1, 1])
-        with stock_left:
-            with st.container(border=True):
-                st.altair_chart(pchart.allocation_donut(merged), width="stretch")
-        with stock_right:
-            with st.container(border=True):
-                with st.container(horizontal=True):
-                    st.metric(
-                        "Largest",
-                        metrics["largest_symbol"],
-                        f"{metrics['largest_weight']:.1f}%",
-                        border=True,
-                    )
-                    st.metric(
-                        "Top 3",
-                        f"{metrics['top3_weight']:.1f}%",
-                        metrics["concentration_label"],
-                        border=True,
-                    )
-                st.altair_chart(pchart.stock_concentration_bars(merged), width="stretch")
-
-        with st.container(border=True):
-            st.altair_chart(pchart.cumulative_concentration(merged), width="stretch")
-
-        st.dataframe(
-            merged[["Symbol", "Weight %", "Current Value", "P&L", "Return %", "Cumulative weight %"]]
-            .head(20)
-            .round(2),
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "Weight %": st.column_config.ProgressColumn(
-                    "Weight",
-                    format="%.1f%%",
-                    min_value=0,
-                    max_value=max(25, float(merged["Weight %"].max()) + 5),
-                ),
-                "Current Value": st.column_config.NumberColumn(format="₹%.0f"),
-                "P&L": st.column_config.NumberColumn(format="₹%.0f"),
-                "Return %": st.column_config.NumberColumn(format="%.1f%%"),
-                "Cumulative weight %": st.column_config.NumberColumn("Cumul. %", format="%.1f%%"),
-            },
-        )
-
-    with sector_tab:
-        if sector_df is None or sector_df.empty:
-            st.info("Load market data above to see sector-wise allocation.")
-        else:
-            sec_left, sec_right = st.columns([1, 1])
-            with sec_left:
-                with st.container(border=True):
-                    st.altair_chart(pchart.sector_donut(sector_df), width="stretch")
-            with sec_right:
-                with st.container(border=True):
-                    st.altair_chart(pchart.sector_weight_bar(sector_df), width="stretch")
-
-            known = sector_df[sector_df["Sector"] != "Unknown"]
-            if not known.empty:
-                top_sec = known.iloc[0]
-                with st.container(horizontal=True):
-                    st.metric(
-                        "Largest sector",
-                        top_sec["Sector"],
-                        f"{top_sec['Weight %']:.1f}%",
-                        border=True,
-                    )
-                    st.metric("Sectors held", len(known), border=True)
-                    if coverage:
-                        st.metric(
-                            "Sector coverage",
-                            f"{coverage['sector_mapped_pct']}%",
-                            f"{coverage['sector_mapped']}/{coverage['total']} mapped",
-                            border=True,
-                        )
-
-            st.dataframe(
-                sector_df[
-                    ["Sector", "Weight %", "Current Value", "P&L", "Return %", "Holdings", "Stocks"]
-                ].round(2),
-                width="stretch",
-                hide_index=True,
-                column_config={
-                    "Weight %": st.column_config.ProgressColumn(
-                        "Weight",
-                        format="%.1f%%",
-                        min_value=0,
-                        max_value=max(30, float(sector_df["Weight %"].max()) + 5),
-                    ),
-                    "Current Value": st.column_config.NumberColumn(format="₹%.0f"),
-                    "P&L": st.column_config.NumberColumn(format="₹%.0f"),
-                    "Return %": st.column_config.NumberColumn(format="%.1f%%"),
-                },
-            )
-
-    with st.expander("Broker split & win/loss", expanded=False):
-        plat_left, plat_right = st.columns(2)
-        with plat_left:
-            st.altair_chart(pchart.platform_donut(portfolio_df), width="stretch")
-        with plat_right:
-            st.altair_chart(pchart.profit_loss_split(metrics), width="stretch")
-
-    pui.section("Vs market", "Portfolio return compared with Nifty 50", icon="compare_arrows")
-
-    cmp_left, cmp_right = st.columns([1.4, 1])
-    with cmp_left:
-        with st.container(border=True):
-            if benchmark and not benchmark.get("chart_df", pd.DataFrame()).empty:
-                st.altair_chart(pchart.nifty_vs_portfolio_line(benchmark["chart_df"]), width="stretch")
-            else:
-                st.info("Could not load Nifty comparison right now.")
-    with cmp_right:
-        with st.container(border=True):
-            if benchmark and benchmark.get("portfolio_return") is not None:
-                alpha = benchmark.get("alpha")
-                st.metric(
-                    "Your portfolio",
-                    f"{benchmark['portfolio_return']:+.1f}%",
-                    f"~{benchmark.get('days', 30)}d",
-                    border=True,
-                )
-                st.metric(
-                    "Nifty 50",
-                    f"{benchmark['nifty_return']:+.1f}%"
-                    if benchmark.get("nifty_return") is not None
-                    else "—",
-                    border=True,
-                )
-                st.metric(
-                    "Difference",
-                    f"{alpha:+.1f}%" if alpha is not None else "—",
-                    border=True,
-                )
-            else:
-                st.info("Return comparison unavailable.")
-
-    if sector_df is not None and not sector_df.empty:
-        sector_vs = pbench.build_sector_vs_nifty(sector_df)
-        if not sector_vs.empty:
-            st.markdown("#### Sector tilt vs Nifty")
-            vs_left, vs_right = st.columns(2)
-            with vs_left:
-                with st.container(border=True):
-                    st.altair_chart(pchart.sector_vs_nifty_grouped(sector_vs), width="stretch")
-            with vs_right:
-                with st.container(border=True):
-                    st.altair_chart(pchart.active_weight_bar(sector_vs), width="stretch")
-
-            st.dataframe(
-                sector_vs.round(2),
-                width="stretch",
-                hide_index=True,
-                column_config={
-                    "Your portfolio %": st.column_config.NumberColumn(format="%.1f%%"),
-                    "Nifty 50 %": st.column_config.NumberColumn(format="%.1f%%"),
-                    "Active weight %": st.column_config.NumberColumn(format="%+.1f%%"),
-                },
-            )
-    else:
-        st.info("Load market data to compare your sector mix against Nifty 50.")
-
-    render_portfolio_risk_section(merged)
-
-    forensic_checks = render_forensic_section(merged, enriched)
-    checks.extend(forensic_checks)
-
-    inst_checks = render_screener_upload(merged)
-    checks.extend(inst_checks)
-
-    if enriched is not None and sector_df is not None and coverage is not None:
-        with st.expander("Sector performance & stock info", expanded=False):
-            with st.container(border=True):
-                st.altair_chart(pchart.sector_return_bar(sector_df), width="stretch")
-            render_stock_info_table(enriched, coverage)
-
-    pui.section("Performance", "Returns, P&L drivers, and weight map", icon="query_stats")
-    perf_left, perf_right = st.columns(2)
-    with perf_left:
-        with st.container(border=True):
-            st.altair_chart(pchart.return_weight_scatter(merged), width="stretch")
-    with perf_right:
-        with st.container(border=True):
-            st.altair_chart(pchart.pnl_waterfall(merged), width="stretch")
-
-    show_quadrants = st.toggle("Show performance quadrants", value=False)
-    if show_quadrants:
-        quadrant_meta = [
-            ("Core winners", quadrants["Core winners"], ":green-badge[Core]"),
-            ("Core losers", quadrants["Core losers"], ":red-badge[Core]"),
-            ("Small winners", quadrants["Small winners"], ":green-badge[Small]"),
-            ("Low-impact losers", quadrants["Low-impact losers"], ":orange-badge[Small]"),
-        ]
-        quad_col1, quad_col2, quad_col3, quad_col4 = st.columns(4, border=True)
-        for col, (title, symbols, _badge) in zip([quad_col1, quad_col2, quad_col3, quad_col4], quadrant_meta):
-            with col:
-                st.markdown(f"**{title}**")
-                if symbols:
-                    st.markdown(", ".join(f"**{s}**" for s in symbols))
-                else:
-                    st.caption("None in this bucket")
-
-    pui.section("Full weightage", icon="table_chart")
-    weight_table = pan.format_weight_table(merged)
-    st.dataframe(
-        weight_table,
-        width="stretch",
-        hide_index=True,
-        column_config={
-            "Symbol": st.column_config.TextColumn("Stock", width="small"),
-            "Platforms": st.column_config.TextColumn("Platforms", width="medium"),
-            "Weight %": st.column_config.ProgressColumn(
-                "Weight",
-                format="%.1f%%",
-                min_value=0,
-                max_value=max(20, float(weight_table["Weight %"].max()) + 2),
-            ),
-            "Cumulative weight %": st.column_config.NumberColumn("Cumulative %", format="%.1f"),
-            "Invested Value": st.column_config.NumberColumn("Invested", format="₹%.0f"),
-            "Current Value": st.column_config.NumberColumn("Current", format="₹%.0f"),
-            "P&L": st.column_config.NumberColumn("P&L", format="₹%.0f"),
-            "Return %": st.column_config.NumberColumn("Return", format="%.2f%%"),
-            "P&L contribution %": st.column_config.NumberColumn("P&L share", format="%.1f%%"),
-        },
+    score_tab, alloc_tab, market_tab, deep_tab = st.tabs(
+        [
+            ":material/speed: Scorecard",
+            ":material/pie_chart: Allocation",
+            ":material/compare_arrows: Market & risk",
+            ":material/fact_check: Quality checks",
+        ],
+        on_change="rerun",
+        key="insights_main_tabs",
+        default=":material/speed: Scorecard",
     )
 
-    top_left, top_mid, top_right = st.columns(3)
-    perf_tables = [
-        ("Top gainers", merged.nlargest(5, "Return %")),
-        ("Top losers", merged.nsmallest(5, "Return %")),
-        (
-            "Largest P&L impact",
-            merged.reindex(merged["P&L"].abs().sort_values(ascending=False).index),
-        ),
-    ]
-    for col, (title, data) in zip([top_left, top_mid, top_right], perf_tables):
-        with col:
-            with st.container(border=True):
-                st.markdown(f"**{title}**")
+    with score_tab:
+        if score_tab.open:
+            render_portfolio_ai_engine(portfolio_df)
+            pui.section(
+                "Portfolio diagnosis",
+                "Plain read of where your money sits, what is dragging results, and what to do next",
+            )
+            render_research_brief(brief)
+            render_portfolio_checks(checks)
+
+            pui.section(
+                "Return and P&L drivers",
+                "Which holdings contributed most to gains and losses",
+            )
+            perf_left, perf_right = st.columns(2)
+            with perf_left:
+                with st.container(border=True):
+                    st.altair_chart(pchart.return_weight_scatter(merged), width="stretch")
+            with perf_right:
+                with st.container(border=True):
+                    st.altair_chart(pchart.pnl_waterfall(merged), width="stretch")
+
+            show_quadrants = st.toggle("Show performance quadrants", value=False, key="show_quads")
+            if show_quadrants:
+                quadrant_meta = [
+                    ("Core winners", quadrants["Core winners"]),
+                    ("Core losers", quadrants["Core losers"]),
+                    ("Small winners", quadrants["Small winners"]),
+                    ("Low-impact losers", quadrants["Low-impact losers"]),
+                ]
+                quad_cols = st.columns(4, border=True)
+                for col, (title, symbols) in zip(quad_cols, quadrant_meta):
+                    with col:
+                        st.markdown(f"**{title}**")
+                        if symbols:
+                            st.markdown(", ".join(f"**{s}**" for s in symbols))
+                        else:
+                            st.caption("None in this bucket")
+
+            top_left, top_mid, top_right = st.columns(3)
+            perf_tables = [
+                ("Top gainers", merged.nlargest(5, "Return %")),
+                ("Top losers", merged.nsmallest(5, "Return %")),
+                (
+                    "Largest P&L impact",
+                    merged.reindex(merged["P&L"].abs().sort_values(ascending=False).index),
+                ),
+            ]
+            for col, (title, data) in zip([top_left, top_mid, top_right], perf_tables):
+                with col:
+                    with st.container(border=True):
+                        st.markdown(f"**{title}**")
+                        st.dataframe(
+                            data.head(5)[["Symbol", "P&L", "Return %", "Weight %"]],
+                            width="stretch",
+                            hide_index=True,
+                            column_config={
+                                "P&L": st.column_config.NumberColumn(format="₹%.0f"),
+                                "Return %": st.column_config.NumberColumn(format="%.1f%%"),
+                                "Weight %": st.column_config.NumberColumn(format="%.1f%%"),
+                            },
+                        )
+
+    with alloc_tab:
+        if alloc_tab.open:
+            pui.section(
+                "Portfolio allocation",
+                "How portfolio weight is spread across stocks and sectors",
+            )
+            stock_tab, sector_tab = st.tabs(
+                ["By stock", "By sector"], key="alloc_inner_tabs"
+            )
+
+            with stock_tab:
+                stock_left, stock_right = st.columns([1, 1])
+                with stock_left:
+                    with st.container(border=True):
+                        st.altair_chart(pchart.allocation_donut(merged), width="stretch")
+                with stock_right:
+                    with st.container(border=True):
+                        with st.container(horizontal=True):
+                            st.metric(
+                                "Largest",
+                                metrics["largest_symbol"],
+                                f"{metrics['largest_weight']:.1f}%",
+                                border=True,
+                            )
+                            st.metric(
+                                "Top 3",
+                                f"{metrics['top3_weight']:.1f}%",
+                                metrics["concentration_label"],
+                                border=True,
+                            )
+                        st.altair_chart(pchart.stock_concentration_bars(merged), width="stretch")
+
+                with st.container(border=True):
+                    st.altair_chart(pchart.cumulative_concentration(merged), width="stretch")
+
                 st.dataframe(
-                    data.head(5)[["Symbol", "P&L", "Return %", "Weight %"]],
+                    merged[
+                        ["Symbol", "Weight %", "Current Value", "P&L", "Return %", "Cumulative weight %"]
+                    ]
+                    .head(20)
+                    .round(2),
                     width="stretch",
                     hide_index=True,
                     column_config={
+                        "Weight %": st.column_config.ProgressColumn(
+                            "Weight",
+                            format="%.1f%%",
+                            min_value=0,
+                            max_value=max(25, float(merged["Weight %"].max()) + 5),
+                        ),
+                        "Current Value": st.column_config.NumberColumn(format="₹%.0f"),
                         "P&L": st.column_config.NumberColumn(format="₹%.0f"),
                         "Return %": st.column_config.NumberColumn(format="%.1f%%"),
-                        "Weight %": st.column_config.NumberColumn(format="%.1f%%"),
+                        "Cumulative weight %": st.column_config.NumberColumn(
+                            "Cumul. %", format="%.1f%%"
+                        ),
                     },
                 )
 
-    st.space("small")
-    render_portfolio_checks(checks)
+                pui.section(
+                    "Full holdings weight table",
+                    "Every stock with portfolio weight, invested value, and P&L contribution",
+                )
+                weight_table = pan.format_weight_table(merged)
+                st.dataframe(
+                    weight_table,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "Symbol": st.column_config.TextColumn("Stock", width="small"),
+                        "Platforms": st.column_config.TextColumn("Platforms", width="medium"),
+                        "Weight %": st.column_config.ProgressColumn(
+                            "Weight",
+                            format="%.1f%%",
+                            min_value=0,
+                            max_value=max(20, float(weight_table["Weight %"].max()) + 2),
+                        ),
+                        "Cumulative weight %": st.column_config.NumberColumn(
+                            "Cumulative %", format="%.1f"
+                        ),
+                        "Invested Value": st.column_config.NumberColumn("Invested", format="₹%.0f"),
+                        "Current Value": st.column_config.NumberColumn("Current", format="₹%.0f"),
+                        "P&L": st.column_config.NumberColumn("P&L", format="₹%.0f"),
+                        "Return %": st.column_config.NumberColumn("Return", format="%.2f%%"),
+                        "P&L contribution %": st.column_config.NumberColumn(
+                            "P&L share", format="%.1f%%"
+                        ),
+                    },
+                )
+
+            with sector_tab:
+                if sector_df is None or sector_df.empty:
+                    st.info("Load market data above to see sector-wise allocation.")
+                else:
+                    sec_left, sec_right = st.columns([1, 1])
+                    with sec_left:
+                        with st.container(border=True):
+                            st.altair_chart(pchart.sector_donut(sector_df), width="stretch")
+                    with sec_right:
+                        with st.container(border=True):
+                            st.altair_chart(pchart.sector_weight_bar(sector_df), width="stretch")
+
+                    known = sector_df[sector_df["Sector"] != "Unknown"]
+                    if not known.empty:
+                        top_sec = known.iloc[0]
+                        with st.container(horizontal=True):
+                            st.metric(
+                                "Largest sector",
+                                top_sec["Sector"],
+                                f"{top_sec['Weight %']:.1f}%",
+                                border=True,
+                            )
+                            st.metric("Sectors held", len(known), border=True)
+                            if coverage:
+                                st.metric(
+                                    "Sector coverage",
+                                    f"{coverage['sector_mapped_pct']}%",
+                                    f"{coverage['sector_mapped']}/{coverage['total']} mapped",
+                                    border=True,
+                                )
+
+                    st.dataframe(
+                        sector_df[
+                            [
+                                "Sector",
+                                "Weight %",
+                                "Current Value",
+                                "P&L",
+                                "Return %",
+                                "Holdings",
+                                "Stocks",
+                            ]
+                        ].round(2),
+                        width="stretch",
+                        hide_index=True,
+                        column_config={
+                            "Weight %": st.column_config.ProgressColumn(
+                                "Weight",
+                                format="%.1f%%",
+                                min_value=0,
+                                max_value=max(30, float(sector_df["Weight %"].max()) + 5),
+                            ),
+                            "Current Value": st.column_config.NumberColumn(format="₹%.0f"),
+                            "P&L": st.column_config.NumberColumn(format="₹%.0f"),
+                            "Return %": st.column_config.NumberColumn(format="%.1f%%"),
+                        },
+                    )
+
+    with market_tab:
+        if market_tab.open:
+            pui.section(
+                "Portfolio vs Nifty 50",
+                "Recent portfolio return compared with the Nifty 50 index",
+            )
+            cmp_left, cmp_right = st.columns([1.4, 1])
+            with cmp_left:
+                with st.container(border=True):
+                    if benchmark and not benchmark.get("chart_df", pd.DataFrame()).empty:
+                        st.altair_chart(
+                            pchart.nifty_vs_portfolio_line(benchmark["chart_df"]), width="stretch"
+                        )
+                    else:
+                        st.info("Could not load Nifty comparison right now.")
+            with cmp_right:
+                with st.container(border=True):
+                    if benchmark and benchmark.get("portfolio_return") is not None:
+                        alpha = benchmark.get("alpha")
+                        st.metric(
+                            "Your portfolio",
+                            f"{benchmark['portfolio_return']:+.1f}%",
+                            f"~{benchmark.get('days', 30)}d",
+                            border=True,
+                        )
+                        st.metric(
+                            "Nifty 50",
+                            f"{benchmark['nifty_return']:+.1f}%"
+                            if benchmark.get("nifty_return") is not None
+                            else "—",
+                            border=True,
+                        )
+                        st.metric(
+                            "Difference",
+                            f"{alpha:+.1f}%" if alpha is not None else "—",
+                            border=True,
+                        )
+                    else:
+                        st.info("Return comparison unavailable.")
+
+            if sector_df is not None and not sector_df.empty:
+                sector_vs = pbench.build_sector_vs_nifty(sector_df)
+                if not sector_vs.empty:
+                    st.markdown("#### Sector weights vs Nifty 50")
+                    vs_left, vs_right = st.columns(2)
+                    with vs_left:
+                        with st.container(border=True):
+                            st.altair_chart(
+                                pchart.sector_vs_nifty_grouped(sector_vs), width="stretch"
+                            )
+                    with vs_right:
+                        with st.container(border=True):
+                            st.altair_chart(pchart.active_weight_bar(sector_vs), width="stretch")
+
+                    st.dataframe(
+                        sector_vs.round(2),
+                        width="stretch",
+                        hide_index=True,
+                        column_config={
+                            "Your portfolio %": st.column_config.NumberColumn(format="%.1f%%"),
+                            "Nifty 50 %": st.column_config.NumberColumn(format="%.1f%%"),
+                            "Active weight %": st.column_config.NumberColumn(format="%+.1f%%"),
+                        },
+                    )
+            else:
+                st.info("Load market data above to compare your sector mix against Nifty 50.")
+
+            render_portfolio_risk_section(merged)
+
+    with deep_tab:
+        if deep_tab.open:
+            forensic_checks = render_forensic_section(merged, enriched)
+            checks.extend(forensic_checks)
+
+            inst_checks = render_screener_upload(merged)
+            checks.extend(inst_checks)
+
+            if enriched is not None and sector_df is not None and coverage is not None:
+                with st.expander("Sector performance & stock info", expanded=False):
+                    with st.container(border=True):
+                        st.altair_chart(pchart.sector_return_bar(sector_df), width="stretch")
+                    render_stock_info_table(enriched, coverage)
+            else:
+                st.info("Load market data above for sector returns and name cards.")
 
 
 def resolve_agent_api_keys() -> dict[str, str | None]:
@@ -1383,21 +1632,26 @@ def _ai_badge(label: str, key: str | None, expected: str | None = None) -> None:
 
 
 def render_research_terminal(merged: pd.DataFrame) -> dict | None:
-    """OpenBB research terminal — free Bloomberg-style fundamentals layer."""
-    pui.section("Research terminal", "OpenBB fundamentals and news pulse", icon="candlestick_chart")
+    """OpenBB research terminal — visual fundamentals board (not a raw table)."""
+    pui.section(
+        "Company fundamentals",
+        "Valuation, profitability, growth, and recent headlines for stocks you hold",
+    )
     if not pterm.is_available():
         reason = pterm.unavailability_reason()
         st.info(
-            f"OpenBB research terminal is unavailable here. {reason} "
-            "The rest of the dashboard works without it."
+            f"Fundamental data is unavailable here. {reason} "
+            "The rest of the dashboard still works."
         )
         return None
 
-    st.caption(
-        "Powered by OpenBB (open-source) + Yahoo Finance. "
-        "Adds P/E, PEG, margins, growth, ROE, D/E, Nifty pulse, and headlines into AI analysis."
+    st.caption("Data is loaded via OpenBB using Yahoo Finance for your portfolio symbols.")
+    load = st.button(
+        "Load company fundamentals",
+        type="primary",
+        icon=":material/download:",
+        key="load_terminal_data",
     )
-    load = st.button("Load terminal data", key="load_terminal_data")
     symbols = tuple(merged["Symbol"].tolist())
     news_symbols = tuple(merged.head(5)["Symbol"].tolist())
 
@@ -1406,7 +1660,7 @@ def render_research_terminal(merged: pd.DataFrame) -> dict | None:
 
     snapshot = None
     if load or st.session_state.get("terminal_snapshot_key") == symbols:
-        with st.spinner("Fetching OpenBB fundamentals and market pulse..."):
+        with st.spinner("Fetching company fundamentals and market pulse..."):
             snapshot = pterm.build_terminal_snapshot(symbols, news_symbols)
         st.session_state.terminal_snapshot_key = symbols
         st.session_state.terminal_snapshot = snapshot
@@ -1414,90 +1668,240 @@ def render_research_terminal(merged: pd.DataFrame) -> dict | None:
         snapshot = st.session_state.terminal_snapshot
 
     if not snapshot or not snapshot.get("available"):
-        st.caption("Click **Load terminal data** to pull fundamentals for your holdings.")
+        st.caption("Click **Load company fundamentals** to fetch data for your holdings.")
         return None
+
+    _render_terminal_board(snapshot, merged)
+    return snapshot
+
+
+def _fmt_num(value, *, pct: bool = False, signed: bool = False, digits: int = 1) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return "—"
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    if pct:
+        return f"{num:+.{digits}f}%" if signed else f"{num:.{digits}f}%"
+    return f"{num:.{digits}f}"
+
+
+def _prepare_terminal_display(snapshot: dict, merged: pd.DataFrame) -> pd.DataFrame:
+    df = pterm.metrics_dataframe(snapshot, merged)
+    if df.empty:
+        return df
+    cols = [
+        "Symbol",
+        "Weight %",
+        "pe_ratio",
+        "forward_pe",
+        "peg_ratio",
+        "profit_margin",
+        "revenue_growth",
+        "earnings_growth",
+        "return_on_equity",
+        "debt_to_equity",
+        "price_return_1y",
+        "name",
+    ]
+    keep = [c for c in cols if c in df.columns]
+    show = df[keep].copy()
+    for col in ("profit_margin", "revenue_growth", "earnings_growth", "return_on_equity", "price_return_1y"):
+        if col in show.columns:
+            show[col] = pd.to_numeric(show[col], errors="coerce") * 100
+    return show.rename(
+        columns={
+            "pe_ratio": "P/E",
+            "forward_pe": "Fwd P/E",
+            "peg_ratio": "PEG",
+            "profit_margin": "Margin",
+            "revenue_growth": "Rev growth",
+            "earnings_growth": "Earn growth",
+            "return_on_equity": "ROE",
+            "debt_to_equity": "D/E",
+            "price_return_1y": "1y return",
+            "name": "Name",
+        }
+    )
+
+
+def _render_terminal_board(snapshot: dict, merged: pd.DataFrame) -> None:
+    """Clean research workstation: scanner · focus · one comparison chart."""
+    show = _prepare_terminal_display(snapshot, merged)
+    if show.empty:
+        st.warning("No fundamental rows returned for current holdings.")
+        return
 
     pulse = snapshot.get("pulse") or {}
     if pulse.get("prev_close"):
-        with st.container(horizontal=True):
-            st.metric("Nifty 50", f"{pulse['prev_close']:,.0f}", border=True)
-            st.metric("52w high", f"{pulse.get('year_high', 0):,.0f}", border=True)
-            st.metric("52w low", f"{pulse.get('year_low', 0):,.0f}", border=True)
-            st.metric("50d MA", f"{pulse.get('ma_50d', 0):,.0f}", border=True)
+        nifty = float(pulse["prev_close"])
+        ma50 = pulse.get("ma_50d")
+        high = pulse.get("year_high")
+        low = pulse.get("year_low")
+        bits = [f"**Nifty 50** {nifty:,.0f}"]
+        if ma50:
+            vs = (nifty / float(ma50) - 1) * 100
+            bits.append(f"50d MA {float(ma50):,.0f} ({vs:+.1f}%)")
+        if high and low:
+            bits.append(f"52w {float(low):,.0f}–{float(high):,.0f}")
+        st.caption(" · ".join(bits))
 
-    df = pterm.metrics_dataframe(snapshot, merged)
-    if not df.empty:
-        show = df[
-            [
-                "Symbol",
-                "Weight %",
-                "pe_ratio",
-                "forward_pe",
-                "peg_ratio",
-                "profit_margin",
-                "revenue_growth",
-                "earnings_growth",
-                "return_on_equity",
-                "debt_to_equity",
-                "price_return_1y",
-            ]
+    symbols = show["Symbol"].tolist()
+    default_sym = symbols[0]
+    largest = None
+    if "Weight %" in merged.columns and not merged.empty:
+        try:
+            largest = str(merged.sort_values("Weight %", ascending=False).iloc[0]["Symbol"])
+        except Exception:
+            largest = None
+    if largest in symbols:
+        default_sym = largest
+
+    scan_col, focus_col = st.columns([1.15, 1], gap="large")
+
+    with scan_col:
+        st.markdown("**Holdings scanner**")
+        st.caption("Sorted by portfolio weight — select a stock on the right for details")
+        scanner = show[
+            [c for c in ("Symbol", "Weight %", "P/E", "ROE", "1y return", "Rev growth") if c in show.columns]
         ].copy()
-        for col in ("profit_margin", "revenue_growth", "earnings_growth", "return_on_equity", "price_return_1y"):
-            if col in show.columns:
-                show[col] = show[col] * 100
-        show = show.rename(
-            columns={
-                "pe_ratio": "P/E",
-                "forward_pe": "Fwd P/E",
-                "peg_ratio": "PEG",
-                "profit_margin": "Margin",
-                "revenue_growth": "Rev growth",
-                "earnings_growth": "Earn growth",
-                "return_on_equity": "ROE",
-                "debt_to_equity": "D/E",
-                "price_return_1y": "1y return",
-            }
-        )
         st.dataframe(
-            show.round(3),
-            width="stretch",
+            scanner.round(1),
+            hide_index=True,
+            height=min(420, 48 + 36 * max(len(scanner), 4)),
+            column_config={
+                "Symbol": st.column_config.TextColumn("Stock", pinned=True),
+                "Weight %": st.column_config.ProgressColumn(
+                    "Portfolio weight",
+                    format="%.1f%%",
+                    min_value=0,
+                    max_value=float(max(scanner["Weight %"].max() if len(scanner) else 1, 1)),
+                ),
+                "P/E": st.column_config.NumberColumn("P/E", format="%.1f", help="Trailing price-to-earnings"),
+                "ROE": st.column_config.NumberColumn("ROE", format="%.0f%%", help="Return on equity"),
+                "1y return": st.column_config.NumberColumn("1y price return", format="%+.0f%%"),
+                "Rev growth": st.column_config.NumberColumn("Revenue growth", format="%+.0f%%"),
+            },
+        )
+
+    with focus_col:
+        st.markdown("**Selected stock**")
+        selected = st.selectbox(
+            "Stock symbol",
+            options=symbols,
+            index=symbols.index(default_sym) if default_sym in symbols else 0,
+            label_visibility="collapsed",
+            key="terminal_focus_symbol",
+        )
+        row = show.loc[show["Symbol"] == selected].iloc[0]
+        name = row.get("Name")
+        wt = row.get("Weight %")
+        header = f"### {selected}"
+        st.markdown(header)
+        meta = []
+        if isinstance(name, str) and name.strip():
+            meta.append(name.strip()[:60])
+        if pd.notna(wt):
+            meta.append(f"{float(wt):.1f}% of portfolio")
+        if meta:
+            st.caption(" · ".join(meta))
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("P/E", _fmt_num(row.get("P/E")), help="Trailing price-to-earnings ratio")
+        m2.metric("Forward P/E", _fmt_num(row.get("Fwd P/E")), help="Forward price-to-earnings")
+        m3.metric("PEG", _fmt_num(row.get("PEG"), digits=2), help="Price/earnings-to-growth")
+        m4, m5, m6 = st.columns(3)
+        m4.metric("ROE", _fmt_num(row.get("ROE"), pct=True, digits=0), help="Return on equity")
+        m5.metric("Profit margin", _fmt_num(row.get("Margin"), pct=True, digits=0))
+        m6.metric("Debt / equity", _fmt_num(row.get("D/E"), digits=1))
+        m7, m8, m9 = st.columns(3)
+        m7.metric(
+            "Revenue growth",
+            _fmt_num(row.get("Rev growth"), pct=True, signed=True, digits=0),
+            help="Year-over-year revenue growth",
+        )
+        m8.metric(
+            "Earnings growth",
+            _fmt_num(row.get("Earn growth"), pct=True, signed=True, digits=0),
+            help="Year-over-year earnings growth",
+        )
+        m9.metric(
+            "1-year price return",
+            _fmt_num(row.get("1y return"), pct=True, signed=True, digits=0),
+        )
+
+        news = (snapshot.get("news") or {}).get(selected) or []
+        if news:
+            st.markdown("**Recent headlines**")
+            for headline in news[:3]:
+                st.markdown(f"- {headline}")
+
+    st.space("small")
+    st.markdown("**Compare holdings**")
+    st.caption("Switch the metric to compare stocks across your portfolio")
+    metric = st.segmented_control(
+        "Comparison metric",
+        options=["P/E", "ROE", "Rev growth", "1y return"],
+        default="P/E",
+        format_func=lambda m: {
+            "P/E": "P/E",
+            "ROE": "ROE",
+            "Rev growth": "Revenue growth",
+            "1y return": "1y price return",
+        }.get(m, m),
+        key="terminal_compare_metric",
+    )
+    metric = metric or "P/E"
+    chart_map = {
+        "P/E": (pchart.terminal_pe_bars, False),
+        "ROE": (pchart.terminal_roe_bars, False),
+        "Rev growth": (pchart.terminal_growth_bars, False),
+        "1y return": (pchart.terminal_return_bars, False),
+    }
+    chart_fn, _ = chart_map[metric]
+    st.altair_chart(chart_fn(show), width="stretch")
+
+    other_news = {
+        sym: heads
+        for sym, heads in (snapshot.get("news") or {}).items()
+        if sym != selected and heads
+    }
+    if other_news:
+        with st.expander("More headlines", icon=":material/newspaper:", expanded=False):
+            for sym, headlines in other_news.items():
+                st.markdown(f"**{sym}**")
+                for headline in headlines:
+                    st.caption(f"· {headline}")
+
+    with st.expander("All metrics", icon=":material/table_chart:", expanded=False):
+        table = show.drop(columns=["Name"], errors="ignore")
+        st.dataframe(
+            table.round(2),
             hide_index=True,
             column_config={
                 "Weight %": st.column_config.NumberColumn(format="%.1f%%"),
                 "Margin": st.column_config.NumberColumn(format="%.1f%%"),
-                "Rev growth": st.column_config.NumberColumn(format="%.1f%%"),
-                "Earn growth": st.column_config.NumberColumn(format="%.1f%%"),
+                "Rev growth": st.column_config.NumberColumn(format="%+.1f%%"),
+                "Earn growth": st.column_config.NumberColumn(format="%+.1f%%"),
                 "ROE": st.column_config.NumberColumn(format="%.1f%%"),
-                "1y return": st.column_config.NumberColumn(format="%.1f%%"),
+                "1y return": st.column_config.NumberColumn(format="%+.1f%%"),
             },
         )
 
-    news = snapshot.get("news") or {}
-    if news:
-        with st.expander("Recent headlines (top holdings)", expanded=False):
-            for sym, headlines in news.items():
-                for headline in headlines:
-                    st.markdown(f"- **{sym}** — {headline}")
 
-    return snapshot
-
-
-def render_ai_research_studio(
+def render_written_research(
     merged: pd.DataFrame,
     summary: dict,
     metrics: dict,
     portfolio_df: pd.DataFrame,
+    terminal_snapshot: dict | None,
 ) -> None:
+    """Book brief, name deep-dive, and transcript tools."""
     pui.section(
-        "AI research studio",
-        "Briefings, deep holding notes, and transcript audit",
-        icon="auto_awesome",
+        "Written research notes",
+        "Generate a portfolio brief or a deeper research note on one stock",
     )
-    st.caption(
-        "OpenBB + Yahoo + Nifty context feed every AI memo. Generate for the full book or one holding."
-    )
-
-    terminal_snapshot = render_research_terminal(merged)
 
     keys = resolve_agent_api_keys()
     openai_key = get_secret("openai.api_key")
@@ -1510,41 +1914,27 @@ def render_ai_research_studio(
         _ai_badge("Groq", keys.get("groq"), expected="groq")
         _ai_badge("OpenAI", openai_key, expected="openai")
 
-    if not keys.get("groq"):
-        st.info(
-            "**Groq not configured yet.** Put your real Groq key (starts with `gsk_`) yourself into "
-            "`.streamlit/secrets.toml` as `[groq] api_key = \"gsk_...\"` "
-            "or into `.env` as `GROQ_API_KEY=gsk_...`. "
-            "Do **not** paste keys in chat. Do **not** put an `xai-` key under Groq — that belongs in `[xai]`."
-        )
-    elif pai.detect_key_provider(keys.get("groq") or "") == "xai":
+    groq_provider = pai.detect_key_provider(keys.get("groq") or "")
+    if groq_provider == "xai":
         st.warning(
-            "Your Groq slot still has an **xAI** key (`xai-...`). "
-            "Move it to `[xai]` and put a `gsk_...` key under `[groq]` in secrets.toml or `.env`."
+            "Your Groq slot has an **xAI** key (`xai-...`). Move it to `[xai]` and put a `gsk_...` key under `[groq]`."
         )
-    elif pai.detect_key_provider(keys.get("groq") or "") == "groq":
-        st.caption("Groq key looks valid (`gsk_`). Fallback order: Gemini Flash → xAI → Groq → OpenAI.")
-
-    if keys.get("xai") and not keys.get("groq"):
-        st.caption(
-            "xAI/Grok is configured as a fallback. Note: new xAI teams often need credits before API calls work."
-        )
-
+        return
     if not has_ai:
         st.warning(
-            "Add at least one AI key in `.streamlit/secrets.toml`:\n\n"
-            "`[gemini] api_key = ...` or `[xai] api_key = ...` or `[groq] api_key = \"gsk_...\"`"
+            "Add at least one key in `.streamlit/secrets.toml`: `[gemini]`, `[xai]`, or `[groq]` (`gsk_...`)."
         )
         return
 
-    brief_col, research_col = st.columns(2)
+    st.caption("Tries Gemini first, then xAI, Groq, OpenAI.")
 
+    brief_col, research_col = st.columns(2)
     with brief_col:
         with st.container(border=True):
-            st.markdown("**Portfolio briefing**")
-            st.caption("Executive memo: health, risks, rebalancing ideas, watchlist.")
-            if st.button("Generate AI briefing", type="primary", width="stretch", key="gen_ai_brief"):
-                with st.spinner("Writing portfolio briefing with AI..."):
+            st.markdown("**Portfolio brief**")
+            st.caption("Summary of portfolio health, key risks, rebalancing ideas, and watchlist.")
+            if st.button("Generate portfolio brief", type="primary", width="stretch", key="gen_ai_brief"):
+                with st.spinner("Writing portfolio brief..."):
                     result = pai.generate_portfolio_briefing(
                         merged,
                         summary,
@@ -1559,33 +1949,39 @@ def render_ai_research_studio(
                     )
                 st.session_state.ai_portfolio_briefing = result
                 st.session_state.chat_messages.append(
-                    {"role": "user", "content": "Generate a full AI portfolio briefing."}
+                    {"role": "user", "content": "Write a full portfolio brief."}
                 )
                 st.session_state.chat_messages.append(
                     {
                         "role": "assistant",
-                        "content": f"*AI briefing via {result['provider']}*\n\n{result['text']}",
+                        "content": f"*Brief via {result['provider']}*\n\n{result['text']}",
                     }
                 )
 
     with research_col:
         with st.container(border=True):
-            st.markdown("**Deep holding research**")
-            st.caption("Fundamentals, 52w positioning, portfolio role, and hold/trim/add with triggers.")
+            st.markdown("**Single-stock research note**")
+            st.caption(
+                "Fundamentals, 52-week range, role in the portfolio, and hold / trim / add triggers."
+            )
             symbols = merged["Symbol"].tolist()
             default_index = 0
             largest = metrics.get("largest_symbol")
             if largest in symbols:
                 default_index = symbols.index(largest)
             research_symbol = st.selectbox(
-                "Holding to research",
+                "Stock to research",
                 options=symbols,
                 index=default_index,
                 key="ai_research_symbol",
             )
-            include_tech = st.toggle("Include 30d price + RSI", value=True, key="ai_research_tech")
-            if st.button("Research holding", width="stretch", key="gen_ai_holding"):
-                with st.spinner(f"Researching {research_symbol} with AI..."):
+            include_tech = st.toggle(
+                "Include 30-day price chart and RSI",
+                value=True,
+                key="ai_research_tech",
+            )
+            if st.button("Generate stock research", width="stretch", key="gen_ai_holding"):
+                with st.spinner(f"Researching {research_symbol}..."):
                     result = pai.research_holding_deep(
                         research_symbol,
                         merged,
@@ -1606,7 +2002,7 @@ def render_ai_research_studio(
                 st.session_state.chat_messages.append(
                     {
                         "role": "assistant",
-                        "content": f"*AI research via {result['provider']}*\n\n{result['text']}",
+                        "content": f"*Name note via {result['provider']}*\n\n{result['text']}",
                     }
                 )
 
@@ -1614,128 +2010,21 @@ def render_ai_research_studio(
         with st.container(border=True):
             provider = st.session_state.ai_portfolio_briefing["provider"]
             paidisp.render_ai_response(
-                f"*Portfolio briefing · {provider}*\n\n{st.session_state.ai_portfolio_briefing['text']}"
+                f"*Portfolio brief · {provider}*\n\n{st.session_state.ai_portfolio_briefing['text']}"
             )
 
     if st.session_state.ai_holding_research:
         with st.container(border=True):
             note = st.session_state.ai_holding_research
             paidisp.render_ai_response(
-                f"*Holding research · `{note['symbol']}` · {note['provider']}*\n\n{note['text']}"
+                f"*Stock research · `{note['symbol']}` · {note['provider']}*\n\n{note['text']}"
             )
 
-    st.divider()
-    render_transcript_auditor(merged, summary, metrics, portfolio_df, keys, openai_key)
+    with st.expander("Earnings call transcript review", expanded=False):
+        render_transcript_auditor(merged, summary, metrics, portfolio_df, keys, openai_key)
 
 
-def render_multi_agent_analyzer(merged: pd.DataFrame) -> None:
-    pui.section(
-        "Stock analyzer",
-        "Prices → RSI → sentiment → AI summary",
-        icon="psychology",
-    )
-    st.caption("Pipeline uses yfinance, Alpha Vantage, Groq (`gsk_`), and Gemini.")
-
-    keys = resolve_agent_api_keys()
-    key_status = st.container(horizontal=True)
-    with key_status:
-        _ai_badge("Alpha Vantage", keys.get("alpha"), expected=None)
-        _ai_badge("Gemini", keys.get("gemini"), expected="gemini")
-        _ai_badge("xAI / Grok", keys.get("xai"), expected="xai")
-        _ai_badge("Groq", keys.get("groq"), expected="groq")
-
-    if not keys.get("groq"):
-        st.caption(
-            "Sentiment needs a real Groq key (`gsk_`) in `[groq]` or `GROQ_API_KEY`. "
-            "xAI (`xai-`) can stand in if Groq is empty, but only when that account has credits."
-        )
-
-    symbols = merged["Symbol"].tolist()
-    if not symbols:
-        st.info("No holdings available to analyze.")
-        return
-
-    default_index = 0
-    for preferred in ("RELIANCE", "GMDCLTD", "BEL"):
-        if preferred in symbols:
-            default_index = symbols.index(preferred)
-            break
-
-    pick_col, run_col = st.columns([3, 1])
-    with pick_col:
-        selected = st.selectbox(
-            "Select a holding",
-            options=symbols,
-            index=default_index,
-            key="agent_symbol_select",
-        )
-    with run_col:
-        st.write("")
-        st.write("")
-        run_clicked = st.button("Run analysis", type="primary", width="stretch")
-
-    if run_clicked:
-        yahoo_ticker = san.to_yahoo_ticker(selected)
-        with st.spinner(f"Running multi-agent pipeline for {yahoo_ticker}..."):
-            result = san.analyze_stock(
-                selected,
-                alpha_key=keys.get("alpha"),
-                # Prefer real Groq (gsk_); fall back to xAI only if Groq is missing.
-                groq_key=keys.get("groq") or keys.get("xai"),
-                gemini_key=keys.get("gemini"),
-                quiet=True,
-            )
-        st.session_state.agent_analysis = result
-        st.session_state.agent_analysis_ticker = selected
-
-        # Also drop a summary into the chat history for continuity.
-        report = san.format_analysis_markdown(result)
-        st.session_state.chat_messages.append(
-            {"role": "user", "content": f"Run multi-agent analysis on {selected}"}
-        )
-        st.session_state.chat_messages.append({"role": "assistant", "content": report})
-
-    result = st.session_state.agent_analysis
-    if result and st.session_state.agent_analysis_ticker:
-        price = result.get("price_summary") or {}
-        metric_row = st.container(horizontal=True)
-        with metric_row:
-            if price:
-                st.metric(
-                    "30d change",
-                    f"{price.get('pct_change_30d', 0):+.2f}%",
-                    price.get("trend", "—"),
-                    border=True,
-                )
-                st.metric("Last close", f"₹{price.get('end_close', 0):,.2f}", border=True)
-            rsi = result.get("rsi")
-            st.metric("RSI (14)", f"{rsi:.1f}" if rsi is not None else "—", border=True)
-            sentiment = result.get("sentiment")
-            st.metric(
-                "Sentiment",
-                f"{sentiment:+.2f}" if sentiment is not None else "—",
-                border=True,
-            )
-
-        analysis = result.get("gemini_analysis")
-        if analysis:
-            paidisp.render_ai_response(analysis, show_meta=False)
-        else:
-            st.caption("_No AI assessment generated._")
-
-        warnings = result.get("warnings") or []
-        if warnings:
-            with st.expander("Pipeline notes"):
-                for warning in warnings:
-                    st.markdown(f"- {warning}")
-
-        if result.get("headlines"):
-            with st.expander("Headlines used for sentiment"):
-                for headline in result["headlines"]:
-                    st.markdown(f"- {headline}")
-
-
-def render_insights_chat(
+def render_portfolio_chat(
     merged: pd.DataFrame,
     summary: dict,
     metrics: dict,
@@ -1746,32 +2035,27 @@ def render_insights_chat(
     openai_model = get_secret("openai.model", "gpt-4o-mini")
     has_ai = bool(keys.get("gemini") or keys.get("xai") or keys.get("groq") or openai_key)
 
-    render_ai_research_studio(merged, summary, metrics, portfolio_df)
-    st.space("medium")
-    render_multi_agent_analyzer(merged)
-    st.space("medium")
-
-    pui.section("Portfolio chat", "Ask questions — agent mode for complex research", icon="chat")
+    pui.section(
+        "Ask about your portfolio",
+        "Ask questions about holdings, risk, allocation, or individual stocks",
+    )
     if has_ai:
         if keys.get("gemini"):
-            provider = "Gemini Flash (with fallbacks)"
+            provider = "Gemini"
         elif keys.get("xai"):
             provider = "xAI / Grok"
         elif keys.get("groq"):
             provider = "Groq"
         else:
             provider = f"OpenAI ({openai_model})"
-        st.caption(
-            f"AI chat enabled via {provider}. Complex questions use an **agent** "
-            "(Groq plans tools → live data → Gemini/Groq answer). Simple questions stay fast."
-        )
+        st.caption(f"Answers use {provider} and are grounded in your current holdings data.")
     else:
         st.caption(
-            "Add keys in `.streamlit/secrets.toml`: `[gemini]`, `[xai]` (`xai-...`), "
-            "and/or `[groq]` (`gsk_...`). Basic offline answers still work for a few questions."
+            "Add keys in `.streamlit/secrets.toml`: `[gemini]`, `[xai]`, and/or `[groq]`. "
+            "A few offline answers still work without keys."
         )
 
-    if st.button("Clear chat"):
+    if st.button("Clear chat", key="clear_research_chat"):
         st.session_state.chat_messages = []
         st.rerun()
 
@@ -1780,6 +2064,7 @@ def render_insights_chat(
             "Try asking",
             list(pchat.SUGGESTED_QUESTIONS.keys()),
             label_visibility="collapsed",
+            key="research_chat_pills",
         )
         if selected:
             st.session_state.chat_messages.append(
@@ -1795,15 +2080,16 @@ def render_insights_chat(
                 st.markdown(msg["content"])
 
     if prompt := st.chat_input(
-        "Ask for briefing, risks, rebalancing ideas, or research a stock...",
+        "Ask about risk, allocation, Nifty, or a specific stock…",
         submit_mode="disable",
+        key="research_chat_input",
     ):
         st.session_state.chat_messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
-            with st.spinner("Researching with portfolio agent..."):
+            with st.spinner("Analysing your portfolio..."):
                 response = pchat.get_response(
                     prompt,
                     st.session_state.chat_messages,
@@ -1823,7 +2109,49 @@ def render_insights_chat(
         st.session_state.chat_messages.append({"role": "assistant", "content": response})
 
 
+def render_research_tab(
+    portfolio_df: pd.DataFrame,
+    summary: dict,
+) -> None:
+    """Narrative research: fundamentals, written notes, chat — one job per tab."""
+    total_current = summary["total_current"]
+    if total_current <= 0:
+        st.warning("Portfolio value is zero, so research tools cannot run.")
+        return
+
+    merged = pan.merge_holdings(portfolio_df, total_current)
+    metrics = pan.compute_metrics(merged, summary)
+
+    fund_tab, notes_tab, chat_tab = st.tabs(
+        [
+            ":material/candlestick_chart: Fundamentals",
+            ":material/edit_note: Research notes",
+            ":material/chat: Q&A",
+        ],
+        on_change="rerun",
+        key="research_main_tabs",
+        default=":material/candlestick_chart: Fundamentals",
+    )
+
+    terminal_snapshot = st.session_state.get("terminal_snapshot")
+
+    with fund_tab:
+        if fund_tab.open:
+            terminal_snapshot = render_research_terminal(merged)
+
+    with notes_tab:
+        if notes_tab.open:
+            render_written_research(
+                merged, summary, metrics, portfolio_df, terminal_snapshot
+            )
+
+    with chat_tab:
+        if chat_tab.open:
+            render_portfolio_chat(merged, summary, metrics, portfolio_df)
+
+
 def render_insights_tab(portfolio_df: pd.DataFrame, summary: dict) -> None:
+    """Quantitative analysis only — scorecard, allocation, risk, benchmarks."""
     total_current = summary["total_current"]
     if total_current <= 0:
         st.warning("Portfolio value is zero, so insights cannot be calculated.")
@@ -1831,19 +2159,7 @@ def render_insights_tab(portfolio_df: pd.DataFrame, summary: dict) -> None:
 
     merged = pan.merge_holdings(portfolio_df, total_current)
     metrics = pan.compute_metrics(merged, summary)
-
-    insight_view = st.segmented_control(
-        "Insights view",
-        ["Analysis", "Research chat"],
-        default="Analysis",
-        label_visibility="collapsed",
-    )
-    st.space("small")
-
-    if insight_view == "Analysis":
-        render_insights_analysis(merged, metrics, portfolio_df, summary)
-    else:
-        render_insights_chat(merged, summary, metrics, portfolio_df)
+    render_insights_analysis(merged, metrics, portfolio_df, summary)
 
 
 def render_zerodha_sidebar() -> tuple[str, str]:
@@ -1959,32 +2275,35 @@ def render_zerodha_sidebar() -> tuple[str, str]:
 
 
 # --- Sidebar ---
-pui.sidebar_block("Data sources", icon="cloud_sync")
+pui.sidebar_howto()
+pui.sidebar_block("Data sources")
 
 with st.sidebar.container(border=True):
-    st.markdown("**:material/link: Zerodha (live)**")
+    st.markdown("**1 · Zerodha (live holdings)**")
     api_key, access_token = render_zerodha_sidebar()
 
 with st.sidebar.container(border=True):
-    st.markdown("**:material/upload_file: Groww (CSV)**")
+    st.markdown("**1 · Groww (holdings file)**")
     groww_file = st.file_uploader(
-        "Holdings export",
+        "Upload Groww holdings CSV or Excel",
         type=["csv", "xlsx"],
         label_visibility="collapsed",
     )
 
 st.sidebar.space("small")
+st.sidebar.markdown("**2 · Update prices**")
 if st.sidebar.button(
-    "Calculate live wealth",
+    "Refresh portfolio",
     type="primary",
     width="stretch",
-    icon=":material/bolt:",
+    icon=":material/refresh:",
 ):
     calculate_portfolio(api_key, access_token, groww_file)
 
+st.sidebar.markdown("**3 · Save for trends**")
 if st.sidebar.button("Save today's snapshot", width="stretch", icon=":material/photo_camera:"):
     if st.session_state.portfolio_summary is None:
-        st.sidebar.warning("Calculate your portfolio first.")
+        st.sidebar.warning("Refresh the portfolio first.")
     else:
         summary = st.session_state.portfolio_summary
         saved_date = ph.save_snapshot(
@@ -1999,21 +2318,25 @@ if st.sidebar.button("Save today's snapshot", width="stretch", icon=":material/p
 
 last_snapshot = ph.get_last_snapshot_date()
 if last_snapshot:
-    st.sidebar.caption(f"Last snapshot · {last_snapshot.strftime('%d %b %Y')}")
+    st.sidebar.caption(f"Last snapshot saved · {last_snapshot.strftime('%d %b %Y')}")
+elif st.session_state.portfolio_summary is not None:
+    st.sidebar.caption("No snapshot saved yet — save one to unlock Trends.")
 
 # --- Main navigation ---
 NAV_ICONS = {
     "Portfolio": ":material/account_balance_wallet: Portfolio",
-    "Trends": ":material/timeline: Trends",
     "Insights": ":material/insights: Insights",
+    "Research": ":material/menu_book: Research",
+    "Trends": ":material/timeline: Trends",
 }
 main_view = st.segmented_control(
-    "Dashboard view",
-    ["Portfolio", "Trends", "Insights"],
+    "Go to",
+    ["Portfolio", "Insights", "Research", "Trends"],
     default="Portfolio",
     format_func=lambda view: NAV_ICONS[view],
     label_visibility="collapsed",
     width="stretch",
+    key="main_nav",
 )
 main_view = main_view or "Portfolio"
 
@@ -2024,20 +2347,43 @@ if main_view == "Portfolio":
     if st.session_state.portfolio_df is None:
         pui.empty_state(
             "No portfolio loaded",
-            "Connect **Zerodha** and/or upload a **Groww** file in the sidebar.",
+            "Connect a broker and refresh to view your holdings and portfolio value.",
             icon="upload",
-            hint="Then click **Calculate live wealth**.",
+            steps=[
+                "Connect **Zerodha** and/or upload a **Groww** holdings file",
+                "Click **Refresh portfolio**",
+                "Review value by broker and the holdings table on this page",
+            ],
         )
     else:
         render_portfolio_tab(st.session_state.portfolio_df, st.session_state.portfolio_summary)
 elif main_view == "Trends":
     render_trends_tab()
+elif main_view == "Research":
+    if st.session_state.portfolio_df is None:
+        pui.empty_state(
+            "Portfolio required",
+            "Stock research needs your current holdings to know which companies to analyse.",
+            icon="menu_book",
+            steps=[
+                "Refresh the portfolio from the sidebar",
+                "Open **Fundamentals** and load company data",
+                "Use **Research notes** or **Q&A** for written analysis",
+            ],
+        )
+    else:
+        render_research_tab(st.session_state.portfolio_df, st.session_state.portfolio_summary)
 else:
     if st.session_state.portfolio_df is None:
         pui.empty_state(
-            "Insights need portfolio data",
-            "Calculate live wealth first to unlock allocation, benchmarks, and AI research.",
+            "Portfolio required",
+            "Portfolio analysis needs your current holdings.",
             icon="insights",
+            steps=[
+                "Refresh the portfolio from the sidebar",
+                "Start on the **Scorecard** tab",
+                "Open **Allocation** if a few stocks dominate portfolio weight",
+            ],
         )
     else:
         render_insights_tab(st.session_state.portfolio_df, st.session_state.portfolio_summary)

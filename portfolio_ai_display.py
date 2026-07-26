@@ -50,26 +50,16 @@ def _section_tone(title: str) -> str:
 
 
 def _render_section(title: str, content: str) -> None:
-    tone = _section_tone(title)
     with st.container(border=True):
-        if tone == "headline":
-            st.markdown(f"**:blue[{title}]**")
-        elif tone == "risk":
-            st.markdown(f"**:red[{title}]**")
-        elif tone == "action":
-            st.markdown(f"**:violet[{title}]**")
-        elif tone == "positive":
-            st.markdown(f"**:green[{title}]**")
-        else:
-            st.markdown(f"**{title}**")
+        st.markdown(f"**{title}**")
         st.markdown(content)
 
 
 def render_ai_response(text: str, *, show_meta: bool = True) -> None:
-    """Render AI markdown in bordered sections with color cues."""
+    """Render research markdown in quiet bordered sections."""
     meta, body = split_meta_and_body(text)
     if show_meta and meta:
-        st.caption(f":material/smart_toy: {meta}")
+        st.caption(meta)
 
     sections = split_sections(body)
     if not sections:
@@ -79,7 +69,7 @@ def render_ai_response(text: str, *, show_meta: bool = True) -> None:
     headline = sections[0]
     if _section_tone(headline[0]) == "headline" or "verdict" in headline[0].lower():
         with st.container(border=True):
-            st.markdown(f"**:blue[{headline[0]}]**")
+            st.markdown(f"**{headline[0]}**")
             st.markdown(headline[1])
         sections = sections[1:]
 
@@ -141,6 +131,7 @@ def _render_scorecard_kpis(scorecard: dict[str, Any], coverage: dict[str, Any], 
             f"{health}/100" if health is not None else "—",
             scorecard.get("health_label"),
             border=True,
+            help="Composite portfolio health score from returns, concentration, and technicals",
         )
         st.metric(
             "Risk score",
@@ -148,48 +139,59 @@ def _render_scorecard_kpis(scorecard: dict[str, Any], coverage: dict[str, Any], 
             scorecard.get("risk_label"),
             border=True,
             delta_color="inverse",
+            help="Higher means more portfolio risk from concentration and volatility signals",
         )
         st.metric(
             "Concentration",
             scorecard.get("concentration") or "—",
-            f"Top3 {scorecard.get('top3_weight_pct', 0):.0f}%",
+            f"Top 3 holdings · {scorecard.get('top3_weight_pct', 0):.0f}%",
             border=True,
             delta_color="off",
+            help="How much of the portfolio sits in the largest positions",
         )
         st.metric(
             "Portfolio return",
             _fmt_pct(ret),
-            f"{scorecard.get('winners', 0)}↑ · {scorecard.get('losers', 0)}↓",
+            f"{scorecard.get('winners', 0)} gainers · {scorecard.get('losers', 0)} losers",
             border=True,
+            help="Overall unrealised return across holdings",
         )
 
     with st.container(horizontal=True):
-        st.metric("Avg RSI-14", scorecard.get("avg_rsi") if scorecard.get("avg_rsi") is not None else "—", border=True)
+        st.metric(
+            "Average RSI (14)",
+            scorecard.get("avg_rsi") if scorecard.get("avg_rsi") is not None else "—",
+            border=True,
+            help="Average 14-day Relative Strength Index across holdings",
+        )
         sma = scorecard.get("pct_above_sma50")
         st.metric(
-            "Above SMA50",
+            "% above 50-day SMA",
             f"{sma:.0f}%" if sma is not None else "—",
             border=True,
+            help="Share of holdings trading above their 50-day simple moving average",
         )
         st.metric(
-            "Avg 20d mom",
+            "Average 20-day momentum",
             _fmt_pct(scorecard.get("avg_momentum_20d")),
             border=True,
+            help="Average price change over the last 20 trading days",
         )
         st.metric(
             "RSI extremes",
-            f"{scorecard.get('overbought_count', 0)} OB · {scorecard.get('oversold_count', 0)} OS",
+            f"{scorecard.get('overbought_count', 0)} overbought · {scorecard.get('oversold_count', 0)} oversold",
             border=True,
             delta_color="off",
+            help="Count of holdings with RSI above 70 (overbought) or below 30 (oversold)",
         )
 
     bits = []
     if provider and provider != "—":
-        bits.append(provider)
+        bits.append(f"Model: {provider}")
     if coverage:
-        bits.append(f"tech {coverage.get('ok', 0)}/{coverage.get('total', 0)}")
+        bits.append(f"Technicals loaded: {coverage.get('ok', 0)}/{coverage.get('total', 0)} holdings")
     if bits:
-        st.caption(" · ".join(bits) + " · objective scores from holdings data; LLM fills tables below")
+        st.caption(" · ".join(bits) + " · scores are calculated from holdings; notes below are model-written")
 
 
 def _movers_frame(rows: list[dict], *, losers: bool = False) -> pd.DataFrame:
@@ -219,7 +221,8 @@ def _render_objective_tables(scorecard: dict[str, Any]) -> None:
     }
     with left:
         with st.container(border=True):
-            st.markdown("**:green[Top gainers]**")
+            st.markdown("**Top gainers**")
+            st.caption("Holdings with the highest unrealised return %")
             st.dataframe(
                 _movers_frame(scorecard.get("top_gainers") or []),
                 hide_index=True,
@@ -227,7 +230,8 @@ def _render_objective_tables(scorecard: dict[str, Any]) -> None:
             )
     with right:
         with st.container(border=True):
-            st.markdown("**:red[Top losers]**")
+            st.markdown("**Top losers**")
+            st.caption("Holdings with the lowest unrealised return %")
             st.dataframe(
                 _movers_frame(scorecard.get("top_losers") or [], losers=True),
                 hide_index=True,
@@ -237,8 +241,8 @@ def _render_objective_tables(scorecard: dict[str, Any]) -> None:
     tech = scorecard.get("technical_table") or []
     if tech:
         with st.container(border=True):
-            st.markdown("**Holdings technical board**")
-            st.caption("Sorted by weight · RSI / SMA / momentum from OpenBB (Yahoo fallback)")
+            st.markdown("**Technical indicators by holding**")
+            st.caption("Sorted by portfolio weight — RSI, distance from 50-day SMA, 20-day momentum")
             tdf = pd.DataFrame(tech)
             if "Weight %" in tdf.columns:
                 tdf = tdf.sort_values("Weight %", ascending=False, na_position="last")
@@ -325,11 +329,11 @@ def _render_insight_panels(insight: dict[str, Any]) -> None:
     actions = _insight_actions_df(insight)
 
     with st.container(border=True):
-        st.markdown("**:blue[1 · Key drivers & technical health]**")
+        st.markdown("**Key return drivers**")
+        st.caption("Holdings and technical signals most influencing portfolio performance")
         if drivers.empty:
-            st.caption("No driver rows from model.")
+            st.caption("No driver notes were returned for this run.")
         else:
-            # Compact visual signal strip
             for _, row in drivers.iterrows():
                 st.markdown(
                     f"{_signal_badge(str(row.get('Signal')))} **{row.get('Symbol')}** · "
@@ -339,9 +343,10 @@ def _render_insight_panels(insight: dict[str, Any]) -> None:
                 st.dataframe(drivers, hide_index=True)
 
     with st.container(border=True):
-        st.markdown("**:red[2 · Risk exposure & concentration]**")
+        st.markdown("**Main risk exposures**")
+        st.caption("Concentration, drawdown, and other portfolio risk flags")
         if risks.empty:
-            st.caption("No risk flags from model.")
+            st.caption("No risk flags were returned for this run.")
         else:
             for _, row in risks.iterrows():
                 st.markdown(
@@ -352,9 +357,10 @@ def _render_insight_panels(insight: dict[str, Any]) -> None:
                 st.dataframe(risks, hide_index=True)
 
     with st.container(border=True):
-        st.markdown("**:violet[3 · Actionable tactical recommendations]**")
+        st.markdown("**Suggested actions**")
+        st.caption("Prioritised hold / trim / add ideas with triggers")
         if actions.empty:
-            st.caption("No actions from model.")
+            st.caption("No actions were returned for this run.")
         else:
             for _, row in actions.iterrows():
                 wt = row.get("Weight %")
@@ -373,7 +379,7 @@ def _render_insight_panels(insight: dict[str, Any]) -> None:
                     },
                 )
 
-    st.caption("Educational analysis only — not personalized investment advice.")
+    st.caption("For education only — not personalised advice.")
 
 
 def render_engine_analysis(result: dict, *, show_payload: bool = False) -> None:

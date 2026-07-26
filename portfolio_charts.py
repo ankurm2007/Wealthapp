@@ -15,35 +15,21 @@ def _dark() -> bool:
 
 
 _LIGHT_PALETTE = {
-    "colors": ["#4F46E5", "#047857", "#0E7490", "#BE123C", "#B45309", "#6D28D9", "#0F766E", "#94A3B8"],
-    "green": "#047857",
-    "red": "#BE123C",
-    "blue": "#4F46E5",
-    "amber": "#B45309",
-    "gray": "#94A3B8",
+    "colors": ["#2563EB", "#0EA5E9", "#EA580C", "#E11D48", "#7C3AED", "#CA8A04", "#0891B2", "#DB2777"],
+    "green": "#16A34A",
+    "red": "#E11D48",
+    "blue": "#2563EB",
+    "amber": "#EA580C",
+    "gray": "#64748B",
     "muted": "#64748B",
-    "title": "#0B1220",
-    "grid": "#E3E8F0",
-    "axis": "#CBD5E1",
+    "title": "#1E293B",
+    "grid": "#DBEAFE",
+    "axis": "#BFDBFE",
     "stroke": "#FFFFFF",
-    "soft_green": "#6EE7B7",
+    "soft_green": "#86EFAC",
     "soft_red": "#FDA4AF",
 }
-_DARK_PALETTE = {
-    "colors": ["#818CF8", "#34D399", "#38BDF8", "#FB7185", "#FBBF24", "#A78BFA", "#2DD4BF", "#94A3B8"],
-    "green": "#34D399",
-    "red": "#FB7185",
-    "blue": "#818CF8",
-    "amber": "#FBBF24",
-    "gray": "#64748B",
-    "muted": "#94A3B8",
-    "title": "#E6EDF7",
-    "grid": "#23304B",
-    "axis": "#334155",
-    "stroke": "#0B1120",
-    "soft_green": "#0F766E",
-    "soft_red": "#9F1239",
-}
+_DARK_PALETTE = _LIGHT_PALETTE  # App is locked to light theme.
 
 
 def _p() -> dict:
@@ -61,8 +47,8 @@ FS_AXIS = 11.5
 FS_LEGEND = 11.5
 
 
-HEADING_FONT = "Plus Jakarta Sans, Inter, sans-serif"
-BODY_FONT = "Inter, sans-serif"
+HEADING_FONT = "Literata, Source Sans 3, Georgia, serif"
+BODY_FONT = "Source Sans 3, system-ui, sans-serif"
 
 
 def _title(text: str, subtitle: str | None = None) -> alt.TitleParams:
@@ -259,7 +245,7 @@ def weight_bar_colored(merged: pd.DataFrame, limit: int = 12) -> alt.Chart:
         )
         .properties(
             height=_bar_height(len(data)),
-            title=_title("Weight vs return", "Green = up · red = down"),
+            title=_title("Weight vs return", "Green is up, red is down"),
         )
     )
 
@@ -333,7 +319,7 @@ def cumulative_concentration(merged: pd.DataFrame) -> alt.Chart:
     return _style(
         (line + rules).properties(
             **_base_props(240),
-            title=_title("Concentration curve", "How much of the book the top names cover"),
+            title=_title("Concentration curve", "Share of portfolio value covered by the largest holdings"),
         )
     )
 
@@ -384,7 +370,7 @@ def return_weight_scatter(merged: pd.DataFrame) -> alt.Chart:
     return _style(
         (h_rule + v_rule + points).properties(
             **_base_props(280),
-            title=_title("Risk map", "Size = value · hover a dot for details"),
+            title=_title("Risk map", "Bubble size is position value"),
         )
     )
 
@@ -624,7 +610,7 @@ def sector_vs_nifty_grouped(active_df: pd.DataFrame) -> alt.Chart:
         )
         .properties(
             height=_bar_height(len(top_sectors), row_px=28),
-            title=_title("Sector mix vs Nifty", "Blue = you · amber = Nifty"),
+            title=_title("Sector mix vs Nifty", "Your weights next to the index"),
         )
     )
 
@@ -694,7 +680,103 @@ def correlation_heatmap(corr: pd.DataFrame) -> alt.Chart | None:
         )
         .properties(
             height=max(240, 28 * len(order)),
-            title=_title("Return correlation", "Top holdings · 252d daily returns"),
+            title=_title("Return correlation", "Top names, last year of daily returns"),
         )
     )
     return _style(chart)
+
+
+def _terminal_h_bar(
+    data: pd.DataFrame,
+    *,
+    value_col: str,
+    title: str,
+    subtitle: str,
+    format_: str = ".1f",
+    diverging: bool = False,
+) -> alt.Chart:
+    """Horizontal bar chart for terminal fundamentals."""
+    plot = data.dropna(subset=[value_col]).copy()
+    if plot.empty:
+        return (
+            alt.Chart(pd.DataFrame({"x": [0], "Symbol": ["No data"]}))
+            .mark_bar()
+            .encode(x="x:Q", y="Symbol:N")
+            .properties(height=120, title=_title(title, "No data for this metric"))
+        )
+
+    plot = plot.sort_values(value_col, ascending=True)
+    height = _bar_height(len(plot), row_px=26, min_h=200)
+
+    if diverging:
+        plot["Tone"] = _gain_loss(plot[value_col])
+        color = alt.Color(
+            "Tone:N",
+            scale=alt.Scale(domain=["Gain", "Loss"], range=[_c("green"), _c("red")]),
+            legend=None,
+        )
+    else:
+        color = alt.value(_c("blue"))
+
+    chart = (
+        alt.Chart(plot)
+        .mark_bar(cornerRadiusEnd=4, size=16)
+        .encode(
+            x=alt.X(f"{value_col}:Q", title=None, axis=alt.Axis(format=format_)),
+            y=alt.Y("Symbol:N", sort=list(plot["Symbol"]), title=None),
+            color=color,
+            tooltip=[
+                alt.Tooltip("Symbol:N"),
+                alt.Tooltip("Weight %:Q", format=".1f", title="Weight %"),
+                alt.Tooltip(f"{value_col}:Q", format=format_, title=value_col),
+            ],
+        )
+        .properties(height=height, title=_title(title, subtitle))
+    )
+    return _style(chart)
+
+
+def terminal_pe_bars(metrics_df: pd.DataFrame, limit: int = 10) -> alt.Chart:
+    data = metrics_df.dropna(subset=["P/E"]).head(limit)
+    return _terminal_h_bar(
+        data,
+        value_col="P/E",
+        title="P/E",
+        subtitle="Trailing multiple, largest weights first",
+        format_=".1f",
+    )
+
+
+def terminal_roe_bars(metrics_df: pd.DataFrame, limit: int = 10) -> alt.Chart:
+    data = metrics_df.dropna(subset=["ROE"]).head(limit)
+    return _terminal_h_bar(
+        data,
+        value_col="ROE",
+        title="Return on equity",
+        subtitle="How much profit each rupee of equity earns",
+        format_=".0f",
+    )
+
+
+def terminal_return_bars(metrics_df: pd.DataFrame, limit: int = 10) -> alt.Chart:
+    data = metrics_df.dropna(subset=["1y return"]).head(limit)
+    return _terminal_h_bar(
+        data,
+        value_col="1y return",
+        title="1-year price return",
+        subtitle="Last twelve months, price only",
+        format_="+.0f",
+        diverging=True,
+    )
+
+
+def terminal_growth_bars(metrics_df: pd.DataFrame, limit: int = 10) -> alt.Chart:
+    data = metrics_df.dropna(subset=["Rev growth"]).head(limit)
+    return _terminal_h_bar(
+        data,
+        value_col="Rev growth",
+        title="Revenue growth",
+        subtitle="Year-over-year, as reported",
+        format_="+.0f",
+        diverging=True,
+    )
