@@ -4,6 +4,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from kiteconnect import KiteConnect
+from kiteconnect.exceptions import KiteException
 
 import portfolio_ai_display as paidisp
 import portfolio_ai as pai
@@ -56,12 +57,6 @@ if "institutional_df" not in st.session_state:
     st.session_state.institutional_df = None
 if "transcript_audit" not in st.session_state:
     st.session_state.transcript_audit = None
-if "zerodha_access_token" not in st.session_state:
-    st.session_state.zerodha_access_token = ""
-if "zerodha_auth_error" not in st.session_state:
-    st.session_state.zerodha_auth_error = ""
-if "zerodha_auth_success" not in st.session_state:
-    st.session_state.zerodha_auth_success = ""
 
 
 def get_secret(path: str, default: str = "") -> str:
@@ -72,6 +67,27 @@ def get_secret(path: str, default: str = "") -> str:
         return str(node) if node else default
     except Exception:
         return default
+
+
+if "zerodha_access_token" not in st.session_state:
+    st.session_state.zerodha_access_token = ""
+if "zerodha_api_secret" not in st.session_state:
+    st.session_state.zerodha_api_secret = ""
+if "zerodha_auth_error" not in st.session_state:
+    st.session_state.zerodha_auth_error = ""
+if "zerodha_auth_success" not in st.session_state:
+    st.session_state.zerodha_auth_success = ""
+
+if not st.session_state.zerodha_api_secret:
+    st.session_state.zerodha_api_secret = get_secret("zerodha.api_secret")
+if not st.session_state.zerodha_access_token:
+    cached_token = zauth.load_cached_token()
+    if cached_token:
+        st.session_state.zerodha_access_token = cached_token
+    else:
+        secrets_token = get_secret("zerodha.access_token")
+        if secrets_token:
+            st.session_state.zerodha_access_token = secrets_token
 
 
 def handle_zerodha_oauth_callback() -> None:
@@ -85,7 +101,10 @@ def handle_zerodha_oauth_callback() -> None:
     handled.add(request_token)
 
     api_key = get_secret("zerodha.api_key")
-    api_secret = get_secret("zerodha.api_secret")
+    api_secret = zauth.resolve_api_secret(
+        get_secret("zerodha.api_secret"),
+        st.session_state.zerodha_api_secret,
+    )
     stored_access_token = get_secret("zerodha.access_token")
     cred_error = zauth.validate_credentials(api_key, api_secret, stored_access_token)
     if cred_error:
@@ -236,7 +255,14 @@ def parse_groww_file(uploaded_file) -> list[dict]:
 def fetch_zerodha_holdings(api_key: str, access_token: str) -> list[dict]:
     kite = KiteConnect(api_key=api_key)
     kite.set_access_token(access_token)
-    live_holdings = kite.holdings()
+    try:
+        live_holdings = kite.holdings()
+    except KiteException as exc:
+        if zauth.is_access_token_error(exc):
+            zauth.clear_cached_token()
+            st.session_state.zerodha_access_token = ""
+            raise RuntimeError(zauth.access_token_error_message(exc)) from exc
+        raise RuntimeError(zauth.token_error_message(exc)) from exc
     return [
         {
             "Owner": "Zerodha (Kite)",
@@ -1209,10 +1235,10 @@ def render_research_terminal(merged: pd.DataFrame) -> dict | None:
     """OpenBB research terminal — free Bloomberg-style fundamentals layer."""
     pui.section("Research terminal", "OpenBB fundamentals and news pulse", icon="candlestick_chart")
     if not pterm.is_available():
+        reason = pterm.unavailability_reason()
         st.info(
-            "Install the free OpenBB data layer for deeper fundamentals: "
-            "`pip install openbb` then restart the app. "
-            "This is the closest free alternative to a Bloomberg terminal — not Bloomberg itself."
+            f"OpenBB research terminal is unavailable here. {reason} "
+            "The rest of the dashboard works without it."
         )
         return None
 
@@ -1676,13 +1702,18 @@ with st.sidebar.container(border=True):
     st.markdown("**:material/link: Zerodha (live)**")
     default_api_key = get_secret("zerodha.api_key")
     default_api_secret = get_secret("zerodha.api_secret")
-    default_access_token = get_secret("zerodha.access_token")
-    cred_error = zauth.validate_credentials(default_api_key, default_api_secret, default_access_token)
-
-    if not st.session_state.zerodha_access_token and default_access_token:
-        st.session_state.zerodha_access_token = default_access_token
+    default_redirect_url = get_secret("zerodha.redirect_url")
+    kite_redirect = zauth.redirect_url(default_redirect_url)
 
     api_key = st.text_input("API key", value=default_api_key, type="password")
+    st.text_input(
+        "API secret",
+        key="zerodha_api_secret",
+        type="password",
+        help="Permanent app secret from developers.kite.trade — not the daily access token.",
+    )
+    effective_secret = zauth.resolve_api_secret(default_api_secret, st.session_state.zerodha_api_secret)
+    cred_error = zauth.validate_credentials(api_key, effective_secret)
 
     if st.session_state.zerodha_auth_success:
         st.success(st.session_state.zerodha_auth_success)
@@ -1691,9 +1722,7 @@ with st.sidebar.container(border=True):
     elif cred_error:
         st.error(cred_error)
     else:
-        st.caption(
-            f"Redirect URL: `{zauth.DEFAULT_REDIRECT_URL}` in Kite Connect app."
-        )
+        st.caption(f"Redirect URL in Kite Connect app: `{kite_redirect}`")
         if api_key.strip():
             st.link_button(
                 "Connect Zerodha",
@@ -1701,24 +1730,23 @@ with st.sidebar.container(border=True):
                 use_container_width=True,
             )
 
+    st.caption(zauth.token_status_caption(st.session_state.zerodha_access_token))
+
     with st.expander("Manual token exchange"):
         with st.form("zerodha_token_form", clear_on_submit=False):
-            api_secret = st.text_input(
-                "API secret",
-                value=default_api_secret,
-                type="password",
-            )
             request_token = st.text_input("Request token or redirect URL")
             submitted = st.form_submit_button("Generate access token")
         if submitted:
-            if not api_key.strip() or not api_secret.strip() or not request_token.strip():
+            if not api_key.strip() or not effective_secret or not request_token.strip():
                 st.error("API key, API secret, and request token are all required.")
             else:
                 try:
                     st.session_state.zerodha_access_token = zauth.generate_access_token(
-                        api_key, api_secret, request_token
+                        api_key, effective_secret, request_token
                     )
-                    st.session_state.zerodha_auth_success = "Access token ready for today."
+                    st.session_state.zerodha_auth_success = (
+                        "Access token ready for today. Valid until 6:00 AM IST tomorrow."
+                    )
                     st.session_state.zerodha_auth_error = ""
                     st.rerun()
                 except Exception as exc:

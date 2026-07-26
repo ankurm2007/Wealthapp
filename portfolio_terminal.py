@@ -13,13 +13,21 @@ import stock_analyzer as san
 
 OPENBB_AVAILABLE = False
 _obb = None
+_OPENBB_IMPORT_ERROR: str | None = None
 
 try:
     from openbb import obb as _obb
 
     OPENBB_AVAILABLE = True
 except ImportError:
-    pass
+    _OPENBB_IMPORT_ERROR = "OpenBB is not installed."
+except (PermissionError, OSError) as exc:
+    _OPENBB_IMPORT_ERROR = (
+        "OpenBB cannot run in this environment (read-only filesystem). "
+        "Install and use it locally instead."
+    )
+except Exception as exc:
+    _OPENBB_IMPORT_ERROR = f"OpenBB failed to load: {exc}"
 
 
 @dataclass
@@ -45,6 +53,14 @@ class TerminalMetrics:
 
 def is_available() -> bool:
     return OPENBB_AVAILABLE
+
+
+def unavailability_reason() -> str:
+    if OPENBB_AVAILABLE:
+        return ""
+    if _OPENBB_IMPORT_ERROR:
+        return _OPENBB_IMPORT_ERROR
+    return "OpenBB is not installed."
 
 
 def _yahoo_symbol(symbol: str) -> str:
@@ -200,7 +216,8 @@ def _fmt_pct(value: float | None, scale: float = 100) -> str:
 
 def build_terminal_context(snapshot: dict, merged: pd.DataFrame) -> str:
     if not snapshot.get("available"):
-        return "OpenBB terminal data: not installed (pip install openbb)."
+        reason = unavailability_reason()
+        return f"OpenBB terminal data unavailable. {reason}"
 
     lines = ["OpenBB research terminal (free data layer, yfinance provider):"]
 

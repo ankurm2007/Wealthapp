@@ -15,16 +15,17 @@ except ModuleNotFoundError:
 import zerodha_auth as zauth
 
 
-def load_zerodha_secrets() -> tuple[str, str, str]:
+def load_zerodha_secrets() -> tuple[str, str, str, str]:
     secrets_path = Path(__file__).resolve().parent / ".streamlit" / "secrets.toml"
     if not secrets_path.exists():
-        return "", "", ""
+        return "", "", "", ""
     data = tomllib.loads(secrets_path.read_text(encoding="utf-8"))
     zerodha = data.get("zerodha", {})
     return (
         str(zerodha.get("api_key", "")).strip(),
         str(zerodha.get("api_secret", "")).strip(),
         str(zerodha.get("access_token", "")).strip(),
+        str(zerodha.get("redirect_url", "")).strip(),
     )
 
 
@@ -39,9 +40,10 @@ def main() -> int:
     parser.add_argument("--api-secret", help="Kite API secret (defaults to secrets.toml)")
     args = parser.parse_args()
 
-    default_key, default_secret, default_access_token = load_zerodha_secrets()
+    default_key, default_secret, default_access_token, default_redirect = load_zerodha_secrets()
     api_key = (args.api_key or default_key).strip()
     api_secret = (args.api_secret or default_secret).strip()
+    redirect = zauth.redirect_url(default_redirect)
 
     cred_error = zauth.validate_credentials(api_key, api_secret, default_access_token)
     if cred_error:
@@ -52,7 +54,7 @@ def main() -> int:
     if not request_token:
         print("Open this URL, log in, then rerun with the request token from the redirect URL:")
         print(zauth.login_url(api_key))
-        print(f"\nRegister this redirect URL in Kite Connect: {zauth.DEFAULT_REDIRECT_URL}")
+        print(f"\nRegister this redirect URL in Kite Connect: {redirect}")
         return 1
 
     try:
@@ -62,7 +64,8 @@ def main() -> int:
         return 1
 
     print(access_token)
-    print("\nPaste this into the sidebar 'Zerodha access token' field.")
+    print(f"\nToken cached at {zauth.TOKEN_CACHE_PATH} until the next 6:00 AM IST reset.")
+    print("The app sidebar will pick it up automatically on refresh.")
     return 0
 
 

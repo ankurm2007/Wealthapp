@@ -4,9 +4,9 @@ kiteconnect
 openpyxl
 altair
 yfinance
-openbb
 openai
 python-dotenv
 requests
 groq
 google-generativeai
+# Optional locally only (breaks on Streamlit Cloud read-only FS): pip install openbb
