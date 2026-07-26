@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
+import pandas as pd
 import streamlit as st
 
 META_LINE = re.compile(r"^\*(.+?)\*\s*$")
@@ -89,48 +91,333 @@ def render_chat_assistant(content: str) -> None:
     render_ai_response(content, show_meta=True)
 
 
-ENGINE_SECTION_ORDER = (
-    "Key Portfolio Drivers & Technical Health",
-    "Risk Exposure & Concentration Flags",
-    "Actionable Tactical Recommendations",
-)
+def _fmt_pct(value: Any, signed: bool = True) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return "—"
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    return f"{num:+.1f}%" if signed else f"{num:.1f}%"
 
 
-def _match_engine_section(title: str) -> str | None:
-    lower = title.lower()
-    for canonical in ENGINE_SECTION_ORDER:
-        if canonical.lower() in lower or lower in canonical.lower():
-            return canonical
-    if "driver" in lower or "technical" in lower:
-        return ENGINE_SECTION_ORDER[0]
-    if "risk" in lower or "concentration" in lower:
-        return ENGINE_SECTION_ORDER[1]
-    if "action" in lower or "tactical" in lower or "recommend" in lower:
-        return ENGINE_SECTION_ORDER[2]
-    return None
+def _signal_badge(signal: str) -> str:
+    s = (signal or "").upper()
+    if s == "BULLISH":
+        return ":green-badge[BULLISH]"
+    if s == "BEARISH":
+        return ":red-badge[BEARISH]"
+    return ":gray-badge[NEUTRAL]"
+
+
+def _severity_badge(severity: str) -> str:
+    s = (severity or "").lower()
+    if s == "high":
+        return ":red-badge[High]"
+    if s == "med" or s == "medium":
+        return ":orange-badge[Med]"
+    return ":green-badge[Low]"
+
+
+def _action_badge(action: str) -> str:
+    a = (action or "").upper()
+    colors = {
+        "TRIM": "red",
+        "ADD": "green",
+        "HOLD": "blue",
+        "WATCH": "orange",
+    }
+    color = colors.get(a, "gray")
+    return f":{color}-badge[{a or '—'}]"
+
+
+def _render_scorecard_kpis(scorecard: dict[str, Any], coverage: dict[str, Any], provider: str) -> None:
+    health = scorecard.get("health_score")
+    risk = scorecard.get("risk_score")
+    ret = scorecard.get("overall_return_pct")
+    with st.container(horizontal=True):
+        st.metric(
+            "Health score",
+            f"{health}/100" if health is not None else "—",
+            scorecard.get("health_label"),
+            border=True,
+        )
+        st.metric(
+            "Risk score",
+            f"{risk}/100" if risk is not None else "—",
+            scorecard.get("risk_label"),
+            border=True,
+            delta_color="inverse",
+        )
+        st.metric(
+            "Concentration",
+            scorecard.get("concentration") or "—",
+            f"Top3 {scorecard.get('top3_weight_pct', 0):.0f}%",
+            border=True,
+            delta_color="off",
+        )
+        st.metric(
+            "Portfolio return",
+            _fmt_pct(ret),
+            f"{scorecard.get('winners', 0)}↑ · {scorecard.get('losers', 0)}↓",
+            border=True,
+        )
+
+    with st.container(horizontal=True):
+        st.metric("Avg RSI-14", scorecard.get("avg_rsi") if scorecard.get("avg_rsi") is not None else "—", border=True)
+        sma = scorecard.get("pct_above_sma50")
+        st.metric(
+            "Above SMA50",
+            f"{sma:.0f}%" if sma is not None else "—",
+            border=True,
+        )
+        st.metric(
+            "Avg 20d mom",
+            _fmt_pct(scorecard.get("avg_momentum_20d")),
+            border=True,
+        )
+        st.metric(
+            "RSI extremes",
+            f"{scorecard.get('overbought_count', 0)} OB · {scorecard.get('oversold_count', 0)} OS",
+            border=True,
+            delta_color="off",
+        )
+
+    bits = []
+    if provider and provider != "—":
+        bits.append(provider)
+    if coverage:
+        bits.append(f"tech {coverage.get('ok', 0)}/{coverage.get('total', 0)}")
+    if bits:
+        st.caption(" · ".join(bits) + " · objective scores from holdings data; LLM fills tables below")
+
+
+def _movers_frame(rows: list[dict], *, losers: bool = False) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame(columns=["Symbol", "Weight %", "Return %", "P&L ₹"])
+    data = [
+        {
+            "Symbol": r.get("symbol"),
+            "Weight %": r.get("weight_pct"),
+            "Return %": r.get("return_pct"),
+            "P&L ₹": r.get("pnl"),
+        }
+        for r in rows
+    ]
+    df = pd.DataFrame(data)
+    if losers and not df.empty and "Return %" in df.columns:
+        df = df.sort_values("Return %", ascending=True)
+    return df
+
+
+def _render_objective_tables(scorecard: dict[str, Any]) -> None:
+    left, right = st.columns(2)
+    mover_cfg = {
+        "Weight %": st.column_config.NumberColumn(format="%.1f%%"),
+        "Return %": st.column_config.NumberColumn(format="%+.1f%%"),
+        "P&L ₹": st.column_config.NumberColumn(format="₹%d"),
+    }
+    with left:
+        with st.container(border=True):
+            st.markdown("**:green[Top gainers]**")
+            st.dataframe(
+                _movers_frame(scorecard.get("top_gainers") or []),
+                hide_index=True,
+                column_config=mover_cfg,
+            )
+    with right:
+        with st.container(border=True):
+            st.markdown("**:red[Top losers]**")
+            st.dataframe(
+                _movers_frame(scorecard.get("top_losers") or [], losers=True),
+                hide_index=True,
+                column_config=mover_cfg,
+            )
+
+    tech = scorecard.get("technical_table") or []
+    if tech:
+        with st.container(border=True):
+            st.markdown("**Holdings technical board**")
+            st.caption("Sorted by weight · RSI / SMA / momentum from OpenBB (Yahoo fallback)")
+            tdf = pd.DataFrame(tech)
+            if "Weight %" in tdf.columns:
+                tdf = tdf.sort_values("Weight %", ascending=False, na_position="last")
+            st.dataframe(
+                tdf,
+                hide_index=True,
+                column_config={
+                    "Weight %": st.column_config.ProgressColumn(
+                        "Weight %",
+                        format="%.1f%%",
+                        min_value=0,
+                        max_value=max(float(tdf["Weight %"].max() or 1), 1),
+                    ),
+                    "Return %": st.column_config.NumberColumn(format="%+.1f%%"),
+                    "P&L ₹": st.column_config.NumberColumn(format="₹%d"),
+                    "RSI-14": st.column_config.NumberColumn(format="%.1f"),
+                    "vs SMA50 %": st.column_config.NumberColumn(format="%+.1f%%"),
+                    "Mom 20d %": st.column_config.NumberColumn(format="%+.1f%%"),
+                },
+            )
+
+
+def _insight_drivers_df(insight: dict[str, Any]) -> pd.DataFrame:
+    rows = []
+    for item in insight.get("drivers") or []:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "Symbol": item.get("symbol"),
+                "Signal": str(item.get("signal") or "NEUTRAL").upper(),
+                "Metric": item.get("metric"),
+                "Note": item.get("note"),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _insight_risks_df(insight: dict[str, Any]) -> pd.DataFrame:
+    rows = []
+    for item in insight.get("risk_flags") or []:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "Flag": item.get("flag"),
+                "Severity": item.get("severity"),
+                "Symbol": item.get("symbol"),
+                "Metric": item.get("metric"),
+                "Note": item.get("note"),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _insight_actions_df(insight: dict[str, Any]) -> pd.DataFrame:
+    rows = []
+    for item in insight.get("actions") or []:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "Priority": item.get("priority"),
+                "Action": str(item.get("action") or "").upper(),
+                "Symbol": item.get("symbol"),
+                "Weight %": item.get("weight_pct"),
+                "Trigger": item.get("trigger"),
+                "Reason": item.get("reason"),
+            }
+        )
+    df = pd.DataFrame(rows)
+    if not df.empty and "Priority" in df.columns:
+        df = df.sort_values("Priority", ascending=True, na_position="last")
+    return df
+
+
+def _render_insight_panels(insight: dict[str, Any]) -> None:
+    verdict = (insight.get("verdict") or "").strip()
+    if verdict:
+        st.info(verdict, icon=":material/verified:")
+
+    drivers = _insight_drivers_df(insight)
+    risks = _insight_risks_df(insight)
+    actions = _insight_actions_df(insight)
+
+    with st.container(border=True):
+        st.markdown("**:blue[1 · Key drivers & technical health]**")
+        if drivers.empty:
+            st.caption("No driver rows from model.")
+        else:
+            # Compact visual signal strip
+            for _, row in drivers.iterrows():
+                st.markdown(
+                    f"{_signal_badge(str(row.get('Signal')))} **{row.get('Symbol')}** · "
+                    f"{row.get('Metric') or '—'} — {row.get('Note') or ''}"
+                )
+            with st.expander("Drivers table", expanded=False):
+                st.dataframe(drivers, hide_index=True)
+
+    with st.container(border=True):
+        st.markdown("**:red[2 · Risk exposure & concentration]**")
+        if risks.empty:
+            st.caption("No risk flags from model.")
+        else:
+            for _, row in risks.iterrows():
+                st.markdown(
+                    f"{_severity_badge(str(row.get('Severity')))} **{row.get('Flag')}** · "
+                    f"`{row.get('Symbol')}` · {row.get('Metric') or '—'} — {row.get('Note') or ''}"
+                )
+            with st.expander("Risk flags table", expanded=False):
+                st.dataframe(risks, hide_index=True)
+
+    with st.container(border=True):
+        st.markdown("**:violet[3 · Actionable tactical recommendations]**")
+        if actions.empty:
+            st.caption("No actions from model.")
+        else:
+            for _, row in actions.iterrows():
+                wt = row.get("Weight %")
+                wt_txt = f"{float(wt):.1f}%" if isinstance(wt, (int, float)) else "—"
+                st.markdown(
+                    f"**#{row.get('Priority') or '—'}** {_action_badge(str(row.get('Action')))} "
+                    f"**{row.get('Symbol')}** ({wt_txt}) · trigger `{row.get('Trigger') or '—'}` — "
+                    f"{row.get('Reason') or ''}"
+                )
+            with st.expander("Actions table", expanded=False):
+                st.dataframe(
+                    actions,
+                    hide_index=True,
+                    column_config={
+                        "Weight %": st.column_config.NumberColumn(format="%.1f%%"),
+                    },
+                )
+
+    st.caption("Educational analysis only — not personalized investment advice.")
 
 
 def render_engine_analysis(result: dict, *, show_payload: bool = False) -> None:
-    """Render Portfolio Analysis Engine output as three structured sections."""
+    """Render Portfolio Analysis Engine as scorecards + tables (not essay prose)."""
     provider = result.get("provider") or "—"
     warnings = result.get("warnings") or []
     coverage = (result.get("technicals") or {}).get("coverage") or {}
+    scorecard = result.get("scorecard") or {}
+    insight = result.get("insight")
 
-    with st.container(horizontal=True):
-        st.metric("Provider", provider, border=True)
-        if coverage:
-            st.metric(
-                "Technicals coverage",
-                f"{coverage.get('ok', 0)}/{coverage.get('total', 0)}",
-                border=True,
-            )
-        portfolio = (result.get("payload") or {}).get("portfolio") or {}
-        if portfolio.get("overall_return_pct") is not None:
-            st.metric(
-                "Portfolio return",
-                f"{portfolio['overall_return_pct']:+.1f}%",
-                border=True,
-            )
+    if not result.get("ok") and not scorecard:
+        st.warning(
+            "Analysis incomplete — market enrichment and/or data prep failed. "
+            "Check warnings and API keys."
+        )
+        if warnings:
+            with st.expander(f"Data warnings ({len(warnings)})", expanded=True):
+                for w in warnings[:40]:
+                    st.caption(w)
+        return
+
+    if scorecard:
+        _render_scorecard_kpis(scorecard, coverage, provider)
+        _render_objective_tables(scorecard)
+    else:
+        with st.container(horizontal=True):
+            st.metric("Provider", provider, border=True)
+            if coverage:
+                st.metric(
+                    "Technicals coverage",
+                    f"{coverage.get('ok', 0)}/{coverage.get('total', 0)}",
+                    border=True,
+                )
+
+    if insight:
+        st.divider()
+        _render_insight_panels(insight)
+    elif result.get("text"):
+        st.divider()
+        st.warning("Model returned unstructured text — showing raw output.")
+        with st.container(border=True):
+            st.markdown(result["text"])
+    elif result.get("ok"):
+        st.info("Objective scorecard ready. LLM insight unavailable — see warnings.")
 
     if warnings:
         with st.expander(
@@ -142,52 +429,6 @@ def render_engine_analysis(result: dict, *, show_payload: bool = False) -> None:
                 st.caption(w)
             if len(warnings) > 40:
                 st.caption(f"…and {len(warnings) - 40} more")
-
-    if not result.get("ok") or not result.get("text"):
-        st.warning(
-            "Analysis incomplete — market enrichment and/or LLM call failed. "
-            "Check warnings above and API keys in secrets."
-        )
-        if show_payload and result.get("payload"):
-            with st.expander("Raw analysis payload", expanded=False):
-                st.json(result["payload"])
-        return
-
-    st.caption(f":material/smart_toy: Quantitative portfolio analysis · {provider}")
-
-    sections = split_sections(result["text"])
-    by_key: dict[str, str] = {}
-    extras: list[tuple[str, str]] = []
-    for title, content in sections:
-        key = _match_engine_section(title)
-        if key and key not in by_key:
-            by_key[key] = content
-        else:
-            extras.append((title, content))
-
-    icons = {
-        ENGINE_SECTION_ORDER[0]: "blue",
-        ENGINE_SECTION_ORDER[1]: "red",
-        ENGINE_SECTION_ORDER[2]: "violet",
-    }
-
-    for canonical in ENGINE_SECTION_ORDER:
-        content = by_key.get(canonical)
-        if not content:
-            continue
-        color = icons[canonical]
-        with st.container(border=True):
-            st.markdown(f"**:{color}[{canonical}]**")
-            st.markdown(content)
-
-    # Fallback if the model ignored ## headers
-    if not by_key:
-        with st.container(border=True):
-            st.markdown(result["text"])
-
-    for title, content in extras:
-        with st.expander(title, expanded=False):
-            st.markdown(content)
 
     if show_payload and result.get("payload"):
         with st.expander("Analysis payload (JSON)", icon=":material/data_object:", expanded=False):

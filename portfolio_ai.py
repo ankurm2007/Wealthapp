@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 import pandas as pd
@@ -94,29 +95,35 @@ Portfolio data:
 """
 
 
-ENGINE_SYSTEM = """You are a Quantitative Portfolio Analyst for Indian equities and ETFs.
-Use ONLY the JSON payload provided. Do not invent prices, RSI, weights, or tickers.
-If a metric is null or a symbol was skipped, say so briefly — do not guess.
-Educational analysis only; end with one short disclaimer line.
-Write in markdown with exactly these three ## section headers (no others):
-## Key Portfolio Drivers & Technical Health
-## Risk Exposure & Concentration Flags
-## Actionable Tactical Recommendations
-Prefer short bullets and compact markdown tables. Bold symbols, weights %, returns %, and RSI values."""
+ENGINE_SYSTEM = """You are a Quantitative Portfolio Analyst. Output STRICT JSON only — no markdown, no prose, no code fences.
+Use ONLY numbers and symbols from the payload. Never invent metrics.
+Every note/reason must be ≤12 words and include at least one number when available.
+Educational only; do not give personalized financial advice."""
 
 
-ENGINE_PROMPT = """Analyze this portfolio JSON as a Quantitative Portfolio Analyst.
+ENGINE_PROMPT = """Score this portfolio. Return ONLY a single JSON object with this exact schema:
 
-Return exactly these three sections:
+{{
+  "verdict": "≤20 words, one factual sentence with numbers",
+  "health_score": 0,
+  "risk_score": 0,
+  "drivers": [
+    {{"symbol": "TICKER", "signal": "BULLISH|BEARISH|NEUTRAL", "metric": "e.g. RSI 62 / wt 12%", "note": "≤12 words"}}
+  ],
+  "risk_flags": [
+    {{"flag": "Concentration|Drawdown|Overbought|Oversold|Below SMA|Other", "severity": "High|Med|Low", "symbol": "TICKER or BOOK", "metric": "number from payload", "note": "≤12 words"}}
+  ],
+  "actions": [
+    {{"priority": 1, "action": "TRIM|HOLD|ADD|WATCH", "symbol": "TICKER", "weight_pct": 0.0, "trigger": "e.g. RSI>70", "reason": "≤12 words"}}
+  ]
+}}
 
-## Key Portfolio Drivers & Technical Health
-What is driving P&L and technical posture (RSI-14, SMA-50, 20d momentum) across enrichable holdings.
-
-## Risk Exposure & Concentration Flags
-Concentration, single-name / sector weight risk, and weak or overbought technicals.
-
-## Actionable Tactical Recommendations
-Concrete TRIM | HOLD | ADD | WATCH ideas with numbers from the payload (weight, RSI, momentum). Max 5 rows.
+Rules:
+- health_score 0–100 (higher = healthier technicals + returns). risk_score 0–100 (higher = more risk).
+- drivers: 3–6 rows from top weights / clearest RSI or momentum signals.
+- risk_flags: 2–5 rows; include concentration if top3_weight_pct is high.
+- actions: 3–5 rows max, ordered by priority.
+- If RSI/SMA missing for a symbol, omit it from drivers/actions rather than guessing.
 
 Portfolio JSON:
 {payload_json}
@@ -779,6 +786,155 @@ def build_analysis_payload(
     }
 
 
+def compute_objective_scorecard(payload: dict[str, Any]) -> dict[str, Any]:
+    """Deterministic health/risk metrics from payload — no LLM required."""
+    port = payload.get("portfolio") or {}
+    holdings = payload.get("holdings") or []
+
+    weights = [float(h.get("weight_pct") or 0) for h in holdings]
+    hhi = round(sum((w / 100.0) ** 2 for w in weights), 4) if weights else 0.0
+    top3 = float(port.get("top3_weight_pct") or 0)
+    if top3 >= 50 or hhi >= 0.18:
+        concentration = "High"
+    elif top3 >= 35 or hhi >= 0.10:
+        concentration = "Medium"
+    else:
+        concentration = "Low"
+
+    rsi_vals: list[float] = []
+    above_sma = 0
+    below_sma = 0
+    overbought = 0
+    oversold = 0
+    mom_vals: list[float] = []
+    tech_rows: list[dict[str, Any]] = []
+
+    for h in holdings:
+        tech = h.get("technicals") or {}
+        rsi = tech.get("rsi_14")
+        mom = tech.get("momentum_20d_pct")
+        vs_sma = tech.get("price_vs_sma50_pct")
+        if isinstance(rsi, (int, float)):
+            rsi_vals.append(float(rsi))
+            if rsi >= 70:
+                overbought += 1
+            elif rsi <= 30:
+                oversold += 1
+        if isinstance(mom, (int, float)):
+            mom_vals.append(float(mom))
+        if isinstance(vs_sma, (int, float)):
+            if vs_sma >= 0:
+                above_sma += 1
+            else:
+                below_sma += 1
+        tech_rows.append(
+            {
+                "Symbol": h.get("symbol"),
+                "Weight %": h.get("weight_pct"),
+                "Return %": h.get("return_pct"),
+                "P&L ₹": h.get("pnl"),
+                "RSI-14": tech.get("rsi_14"),
+                "vs SMA50 %": tech.get("price_vs_sma50_pct"),
+                "Mom 20d %": tech.get("momentum_20d_pct"),
+                "Tech source": tech.get("source") or ("—" if not tech.get("error") else "n/a"),
+            }
+        )
+
+    rsi_n = len(rsi_vals)
+    avg_rsi = round(sum(rsi_vals) / rsi_n, 1) if rsi_n else None
+    avg_mom = round(sum(mom_vals) / len(mom_vals), 1) if mom_vals else None
+    pct_above_sma = round(above_sma / (above_sma + below_sma) * 100, 0) if (above_sma + below_sma) else None
+
+    # Objective health 0–100: return quality + RSI centering + trend breadth
+    ret = float(port.get("overall_return_pct") or 0)
+    health = 50.0
+    health += max(-15.0, min(20.0, ret * 0.4))
+    if avg_rsi is not None:
+        health += max(-15.0, 15.0 - abs(avg_rsi - 50) * 0.5)
+    if pct_above_sma is not None:
+        health += (pct_above_sma - 50) * 0.2
+    health -= overbought * 3 + oversold * 2
+    health = int(max(0, min(100, round(health))))
+
+    risk = 20.0
+    risk += min(40.0, top3 * 0.5)
+    risk += min(25.0, hhi * 100)
+    risk += overbought * 4 + oversold * 3
+    if avg_mom is not None and avg_mom < -5:
+        risk += min(15.0, abs(avg_mom))
+    risk = int(max(0, min(100, round(risk))))
+
+    winners = sum(1 for h in holdings if (h.get("return_pct") or 0) > 0)
+    losers = sum(1 for h in holdings if (h.get("return_pct") or 0) < 0)
+
+    def _health_label(score: int) -> str:
+        if score >= 70:
+            return "Strong"
+        if score >= 50:
+            return "Mixed"
+        return "Weak"
+
+    def _risk_label(score: int) -> str:
+        if score >= 65:
+            return "Elevated"
+        if score >= 40:
+            return "Moderate"
+        return "Contained"
+
+    return {
+        "health_score": health,
+        "health_label": _health_label(health),
+        "risk_score": risk,
+        "risk_label": _risk_label(risk),
+        "concentration": concentration,
+        "hhi": hhi,
+        "top3_weight_pct": top3,
+        "avg_rsi": avg_rsi,
+        "avg_momentum_20d": avg_mom,
+        "pct_above_sma50": pct_above_sma,
+        "overbought_count": overbought,
+        "oversold_count": oversold,
+        "winners": winners,
+        "losers": losers,
+        "holding_count": int(port.get("holding_count") or len(holdings)),
+        "overall_return_pct": port.get("overall_return_pct"),
+        "total_pnl": port.get("total_pnl"),
+        "technical_table": tech_rows,
+        "top_gainers": payload.get("top_gainers") or [],
+        "top_losers": payload.get("top_losers") or [],
+        "top_weights": payload.get("top_weights") or [],
+    }
+
+
+_JSON_FENCE = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.IGNORECASE)
+_JSON_OBJECT = re.compile(r"\{[\s\S]*\}")
+
+
+def parse_engine_insight(text: str) -> dict[str, Any] | None:
+    """Extract structured insight JSON from an LLM response."""
+    if not text or not str(text).strip():
+        return None
+    raw = str(text).strip()
+    candidates: list[str] = [raw]
+    fenced = _JSON_FENCE.search(raw)
+    if fenced:
+        candidates.insert(0, fenced.group(1).strip())
+    obj = _JSON_OBJECT.search(raw)
+    if obj:
+        candidates.append(obj.group(0))
+
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict) and (
+            "drivers" in data or "actions" in data or "risk_flags" in data or "verdict" in data
+        ):
+            return data
+    return None
+
+
 def analyze_portfolio_engine(
     holdings_df: pd.DataFrame,
     *,
@@ -800,6 +956,8 @@ def analyze_portfolio_engine(
         "provider": "",
         "payload": {},
         "technicals": {},
+        "scorecard": {},
+        "insight": None,
         "warnings": warnings,
     }
 
@@ -836,6 +994,7 @@ def analyze_portfolio_engine(
 
     try:
         payload = build_analysis_payload(holdings, technicals)
+        scorecard = compute_objective_scorecard(payload)
     except Exception as exc:
         logger.warning("Payload assembly failed: %s", exc)
         warnings.append(f"payload: {exc}")
@@ -845,6 +1004,9 @@ def analyze_portfolio_engine(
 
     result["payload"] = payload
     result["technicals"] = technicals
+    result["scorecard"] = scorecard
+    # Objective layer alone is enough to show a useful UI
+    result["ok"] = True
 
     try:
         payload_json = json.dumps(payload, default=str, indent=2)
@@ -857,6 +1019,13 @@ def analyze_portfolio_engine(
                 "top_losers": payload["top_losers"],
                 "holdings": payload["holdings"][:20],
                 "market_enrichment": payload["market_enrichment"],
+                "objective_scorecard": {
+                    "health_score": scorecard.get("health_score"),
+                    "risk_score": scorecard.get("risk_score"),
+                    "concentration": scorecard.get("concentration"),
+                    "avg_rsi": scorecard.get("avg_rsi"),
+                    "pct_above_sma50": scorecard.get("pct_above_sma50"),
+                },
             }
             payload_json = json.dumps(slim, default=str, indent=2)
             warnings.append("Payload truncated to top 20 holdings for LLM context limit.")
@@ -870,14 +1039,18 @@ def analyze_portfolio_engine(
             openai_key=openai_key,
             system=ENGINE_SYSTEM,
         )
-        result["ok"] = True
         result["text"] = text
         result["provider"] = provider
+        insight = parse_engine_insight(text)
+        result["insight"] = insight
+        if insight is None:
+            warnings.append("llm: response was not valid structured JSON; showing objective scorecard only.")
     except Exception as exc:
         logger.warning("LLM portfolio analysis failed: %s", exc)
         warnings.append(f"llm: {exc}")
         result["text"] = ""
         result["provider"] = ""
+        result["insight"] = None
 
     result["warnings"] = warnings
     return result

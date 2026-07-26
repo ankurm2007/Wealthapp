@@ -360,8 +360,8 @@ def render_portfolio_ai_engine(portfolio_df: pd.DataFrame) -> None:
     has_ai = bool(keys.get("gemini") or keys.get("xai") or keys.get("groq") or openai_key)
 
     st.caption(
-        "Dynamically reads your active holdings (no hardcoded tickers), "
-        "enriches with RSI-14 / SMA-50 / 20d momentum, then asks the LLM for three structured sections."
+        "Objective scorecard from your holdings + OpenBB technicals, then structured LLM JSON "
+        "(drivers · risks · actions) — not an essay."
     )
 
     if not has_ai:
