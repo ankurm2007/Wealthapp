@@ -2428,9 +2428,16 @@ def _exchange_zerodha_request_token(api_key: str, api_secret: str, raw_token: st
 
 
 def _zerodha_connect_button(label: str, login_url: str) -> None:
-    """Open Kite login — button + plain link (Cloud sometimes drops one of them)."""
+    """
+    Kite login entry points.
+
+    Streamlit Cloud sometimes fails on st.link_button to external sites, so we
+    always show a plain URL the user can open/copy.
+    """
     st.link_button(label, login_url, type="primary", width="stretch")
-    st.markdown(f"[Open Kite login in this tab]({login_url})")
+    st.markdown(f"**Or open this Kite URL:** [{login_url}]({login_url})")
+    st.code(login_url, language=None)
+    st.caption("If the button does nothing, copy the URL above into a new browser tab.")
 
 
 def render_zerodha_sidebar() -> tuple[str, str]:
@@ -2495,15 +2502,21 @@ def render_zerodha_sidebar() -> tuple[str, str]:
         label = "Reconnect Zerodha" if connected else "Connect Zerodha"
         _zerodha_connect_button(label, zauth.login_url(api_key))
         st.caption(
-            f"Kite redirect must be exactly `{kite_redirect}` "
-            "(developers.kite.trade + Streamlit secrets `zerodha.redirect_url`)."
+            f"After login, Kite must send you back to `{kite_redirect}`. "
+            "Set that **exact** URL in https://developers.kite.trade → your app → Redirect URL "
+            "and in Streamlit Cloud Secrets as `zerodha.redirect_url`."
         )
-        if "127.0.0.1" in kite_redirect and on_cloud:
+        if "127.0.0.1" in kite_redirect or "localhost" in kite_redirect:
             st.error(
-                "Cloud secrets still use a local redirect (`127.0.0.1`). "
-                "In Streamlit Cloud → Settings → Secrets set "
-                '`redirect_url = "https://wealthapp-ankur.streamlit.app"` '
-                "and the same URL in developers.kite.trade."
+                "This app thinks redirect is local (`127.0.0.1` / localhost). "
+                "For Streamlit Cloud, both Kite developer console AND Cloud Secrets must use "
+                "`https://wealthapp-ankur.streamlit.app` (no trailing slash). "
+                "Kite allows one redirect URL per app — local and Cloud cannot differ."
+            )
+        elif on_cloud:
+            st.warning(
+                "On Kite developers.kite.trade, Redirect URL must be exactly "
+                f"`{kite_redirect}` — if it still says 127.0.0.1, the Zerodha link fails after login."
             )
 
     if not connected and not cred_error and api_key:

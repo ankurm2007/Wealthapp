@@ -271,7 +271,7 @@ def sidebar_block(title: str, *, icon: str = "tune") -> None:
 def sidebar_howto() -> None:
     """Compact how-to at top of sidebar."""
     # Bright deploy marker — if you don't see this string, Cloud is on an old build.
-    st.sidebar.success("DEPLOY OK · cloud-connect-v5")
+    st.sidebar.success("DEPLOY OK · cloud-connect-v6")
     st.sidebar.markdown("##### How to load your portfolio")
     st.sidebar.caption("1 · Connect Zerodha (live) and/or upload Groww (T+1 as-of)")
     st.sidebar.caption("2 · Upload Realised P&L so booked losses from sells are visible")
