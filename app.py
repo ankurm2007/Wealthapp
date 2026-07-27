@@ -21,6 +21,7 @@ import portfolio_research as presearch
 import portfolio_risk as prisk
 import portfolio_terminal as pterm
 import portfolio_ui as pui
+import day_pnl as dpnl
 import realized_pnl as rpnl
 import screener_import as screener
 import stock_analyzer as san
@@ -64,6 +65,8 @@ if "transcript_audit" not in st.session_state:
     st.session_state.transcript_audit = None
 if "realized_pnl" not in st.session_state:
     st.session_state.realized_pnl = rpnl.load_realized_state()
+if "day_pnl" not in st.session_state:
+    st.session_state.day_pnl = dpnl.empty_day_pnl()
 
 
 def _summary_for_header(summary: dict | None) -> dict | None:
@@ -71,12 +74,24 @@ def _summary_for_header(summary: dict | None) -> dict | None:
         return summary
     out = dict(summary)
     realized_state = st.session_state.get("realized_pnl") or {}
-    if realized_state.get("row_count") or realized_state.get("realized_total"):
-        economic = rpnl.combine_economic_pnl(float(out.get("pl_amount") or 0), realized_state)
-        out["has_realized_pnl"] = True
-        out["realized_total"] = economic["realized"]
-        out["booked_losses"] = economic["booked_losses"]
-        out["economic_pl"] = economic["economic"]
+    day_state = st.session_state.get("day_pnl") or {}
+    has_imported = bool(realized_state.get("row_count") or realized_state.get("realized_total"))
+    today_booked = float(day_state.get("today_booked") or 0) if day_state.get("available") else 0.0
+    if has_imported or today_booked or day_state.get("day_book_move") is not None:
+        combo = dpnl.combine_day_economic(
+            float(out.get("pl_amount") or 0),
+            imported_realized=float(realized_state.get("realized_total") or 0),
+            today_booked=today_booked,
+            has_imported=has_imported,
+        )
+        out["has_realized_pnl"] = has_imported or abs(today_booked) > 0
+        out["realized_total"] = (
+            float(realized_state.get("realized_total") or 0) if has_imported else today_booked
+        )
+        out["booked_losses"] = float(realized_state.get("booked_losses") or 0)
+        out["today_booked"] = today_booked
+        out["day_book_move"] = day_state.get("day_book_move")
+        out["economic_pl"] = combo["economic"]
     return out
 
 
@@ -351,18 +366,35 @@ def parse_groww_file(uploaded_file) -> list[dict]:
     return holdings
 
 
-def fetch_zerodha_holdings(api_key: str, access_token: str) -> list[dict]:
+def _kite_client(api_key: str, access_token: str) -> KiteConnect:
     kite = KiteConnect(api_key=api_key)
     kite.set_access_token(access_token)
-    try:
-        live_holdings = kite.holdings()
-    except KiteException as exc:
+    return kite
+
+
+def _kite_error(exc: Exception) -> RuntimeError:
+    if isinstance(exc, KiteException):
         if zauth.is_access_token_error(exc):
             zauth.clear_cached_token()
             st.session_state.zerodha_access_token = ""
-            raise RuntimeError(zauth.access_token_error_message(exc)) from exc
-        raise RuntimeError(zauth.token_error_message(exc)) from exc
-    return [
+            return RuntimeError(zauth.access_token_error_message(exc))
+        return RuntimeError(zauth.token_error_message(exc))
+    return RuntimeError(str(exc))
+
+
+def fetch_zerodha_portfolio(
+    api_key: str, access_token: str
+) -> tuple[list[dict], dict, list[dict], dict[str, float]]:
+    """One Kite round-trip: holdings rows, positions, trades, avg map."""
+    kite = _kite_client(api_key, access_token)
+    try:
+        live_holdings = kite.holdings() or []
+        positions = kite.positions() or {}
+        trades = kite.trades() or []
+    except Exception as exc:
+        raise _kite_error(exc) from exc
+
+    rows = [
         {
             "Owner": "Zerodha (Kite)",
             "Symbol": item["tradingsymbol"],
@@ -373,6 +405,17 @@ def fetch_zerodha_holdings(api_key: str, access_token: str) -> list[dict]:
         }
         for item in live_holdings
     ]
+    holdings_avg = {
+        str(h.get("tradingsymbol") or ""): float(h.get("average_price") or 0)
+        for h in live_holdings
+        if h.get("tradingsymbol") and float(h.get("average_price") or 0) > 0
+    }
+    return rows, positions, list(trades), holdings_avg
+
+
+def fetch_zerodha_holdings(api_key: str, access_token: str) -> list[dict]:
+    rows, _, _, _ = fetch_zerodha_portfolio(api_key, access_token)
+    return rows
 
 
 def enrich_portfolio(portfolio_df: pd.DataFrame) -> pd.DataFrame:
@@ -435,31 +478,44 @@ def calculate_portfolio(
 
     if api_key and access_token:
         try:
-            z_rows = fetch_zerodha_holdings(api_key, access_token)
+            z_rows, positions, trades, holdings_avg = fetch_zerodha_portfolio(
+                api_key, access_token
+            )
             holdings.extend(z_rows)
             had_zerodha = bool(z_rows)
             st.sidebar.success("Zerodha holdings fetched (live).")
             st.session_state.zerodha_auth_error = ""
+            st.session_state._day_activity = {
+                "positions": positions,
+                "trades": trades,
+                "holdings_avg": holdings_avg,
+            }
         except Exception as exc:
             message = str(exc)
             if "Connect Zerodha" in message:
                 st.session_state.zerodha_auth_error = message
             else:
                 st.sidebar.error(f"Failed to fetch Zerodha data: {exc}")
+            st.session_state._day_activity = None
     elif api_key and not access_token:
+        st.session_state._day_activity = None
         st.sidebar.info(
             "Zerodha API key is set, but today's login is missing. "
             "Connect Zerodha, then Refresh — Groww can still finalise yesterday (T+1)."
         )
     elif access_token and not api_key:
+        st.session_state._day_activity = None
         st.sidebar.warning(
             "Zerodha access token is ready, but the API key is missing. "
             "Add `api_key` under `[zerodha]` in secrets, or enter it in the sidebar."
         )
+    else:
+        st.session_state._day_activity = None
 
     if not holdings:
         st.session_state.portfolio_df = None
         st.session_state.portfolio_summary = None
+        st.session_state.day_pnl = dpnl.empty_day_pnl()
         st.warning("No holdings found. Upload a Groww file and/or connect Zerodha.")
         return
 
@@ -468,6 +524,25 @@ def calculate_portfolio(
     summary = build_summary(portfolio_df)
     st.session_state.portfolio_summary = summary
     pmd.clear_market_cache()
+
+    # Day P&L: yesterday snapshot + today's Zerodha positions/trades.
+    try:
+        prior = ph.get_previous_snapshot(ph.today_ist())
+        activity = st.session_state.get("_day_activity") or {}
+        st.session_state.day_pnl = dpnl.build_day_pnl(
+            live_summary=summary,
+            prior_snapshot=prior,
+            positions_payload=activity.get("positions"),
+            trades=activity.get("trades"),
+            holdings_avg=activity.get("holdings_avg"),
+            source="zerodha" if activity else "book-move-only",
+        )
+    except Exception as exc:
+        st.session_state.day_pnl = {
+            **dpnl.empty_day_pnl(),
+            "error": str(exc),
+            "note": f"Day P&L failed: {exc}",
+        }
 
     # History: live Zerodha for today + Groww T+1 as-of (default yesterday) + carries.
     try:
@@ -589,7 +664,16 @@ def render_decision_snapshot(portfolio_df: pd.DataFrame, summary: dict) -> None:
     # --- Capital ---
     st.markdown("**Capital position**")
     realized_state = st.session_state.get("realized_pnl") or rpnl.empty_realized_state()
-    economic = rpnl.combine_economic_pnl(pl, realized_state)
+    day_state = st.session_state.get("day_pnl") or dpnl.empty_day_pnl()
+    has_imported = bool(realized_state.get("row_count") or realized_state.get("realized_total"))
+    today_booked = float(day_state.get("today_booked") or 0) if day_state.get("available") else 0.0
+    day_move = day_state.get("day_book_move")
+    combo = dpnl.combine_day_economic(
+        pl,
+        imported_realized=float(realized_state.get("realized_total") or 0),
+        today_booked=today_booked,
+        has_imported=has_imported,
+    )
     with st.container(horizontal=True):
         st.metric(
             "Total invested",
@@ -622,46 +706,135 @@ def render_decision_snapshot(portfolio_df: pd.DataFrame, summary: dict) -> None:
             border=True,
         )
 
-    # Booked (realised) P&L — without this, sells vanish and the book looks too green.
-    st.markdown("**Booked + economic P&L**")
-    has_realized = bool(realized_state.get("row_count") or realized_state.get("realized_total"))
+    # Day P&L from yesterday snapshot + today's Zerodha orders/positions.
+    st.markdown("**Day P&L**")
+    prior_label = day_state.get("prior_date") or "—"
     with st.container(horizontal=True):
         st.metric(
-            "Booked (realised) P&L",
-            pui.format_inr_compact(economic["realized"]) if has_realized else "—",
-            (
-                f"{realized_state.get('loss_count', 0)} loss / "
-                f"{realized_state.get('gain_count', 0)} gain closes"
-                if has_realized
-                else "Upload Console/Groww P&L"
+            "Day book move",
+            pui.format_inr_compact(day_move) if day_move is not None else "—",
+            f"vs {prior_label}" if day_move is not None else "Need prior snapshot",
+            delta_color="normal" if day_move is not None else "off",
+            help=(
+                "Live total − prior history snapshot. Book-value change only "
+                "(excludes cash; Groww may lag T+1)."
             ),
-            delta_color="off",
-            help="From sold trades in your broker P&L export — includes booked losses.",
             border=True,
         )
         st.metric(
-            "Booked losses",
-            pui.format_inr_compact(economic["booked_losses"]) if has_realized else "—",
-            help="Sum of realised losses only (negative).",
+            "Today booked (live)",
+            pui.format_inr_compact(today_booked) if day_state.get("available") else "—",
+            (
+                f"{day_state.get('sell_count', 0)} sell(s) · Zerodha"
+                if day_state.get("available")
+                else "Connect Zerodha + Refresh"
+            ),
+            delta_color="off",
+            help="From today's Zerodha positions/trades. Groww same-day booked needs a P&L export.",
             border=True,
         )
         st.metric(
             "Economic P&L",
-            pui.format_inr_compact(economic["economic"]) if has_realized else pui.format_inr_compact(pl),
+            pui.format_inr_compact(combo["economic"]),
             (
-                "Unrealised + booked"
-                if has_realized
-                else "Unrealised only until P&L file is loaded"
+                "Unrealised + imported booked"
+                if has_imported
+                else (
+                    "Unrealised + today booked"
+                    if abs(today_booked) > 0
+                    else "Unrealised only"
+                )
             ),
             delta_color="off",
-            help="Unrealised on open book plus realised P&L from sells.",
+            help=(
+                "If a Console/Groww P&L file is loaded, economic uses that imported total "
+                "(today live booked shown separately to avoid double-count)."
+                if has_imported
+                else "Unrealised on open book plus today's live booked from Zerodha."
+            ),
             border=True,
         )
 
-    if has_realized and realized_state.get("top_losses"):
+    sells = [
+        t
+        for t in (day_state.get("trades") or [])
+        if str(t.get("side") or "").upper() == "SELL"
+    ]
+    if sells:
+        with st.expander("Today's sells (Zerodha)", expanded=False):
+            sell_df = pd.DataFrame(sells)
+            show_cols = [
+                c
+                for c in ["symbol", "quantity", "price", "value", "product", "estimated_pnl"]
+                if c in sell_df.columns
+            ]
+            st.dataframe(
+                sell_df[show_cols],
+                hide_index=True,
+                column_config={
+                    "symbol": "Symbol",
+                    "quantity": st.column_config.NumberColumn("Qty", format="%.0f"),
+                    "price": st.column_config.NumberColumn("Price", format="₹%.2f"),
+                    "value": st.column_config.NumberColumn("Value", format="₹%d"),
+                    "product": "Product",
+                    "estimated_pnl": st.column_config.NumberColumn(
+                        "Est. P&L", format="₹%d"
+                    ),
+                },
+            )
+            st.caption(
+                "Estimated P&L uses current holding average when still open; "
+                "full exits rely on day-position realised."
+            )
+    elif day_state.get("available") and day_move is None:
+        st.caption(day_state.get("note") or "Day book move needs a prior history snapshot.")
+    elif not day_state.get("available"):
+        st.caption(
+            "Connect Zerodha and Refresh to load today's trades/positions for Day P&L."
+        )
+
+    # Booked (realised) P&L from imported Console / Groww file.
+    st.markdown("**Imported booked P&L**")
+    with st.container(horizontal=True):
+        st.metric(
+            "Booked (realised) P&L",
+            pui.format_inr_compact(combo["imported_realized"]) if has_imported else "—",
+            (
+                f"{realized_state.get('loss_count', 0)} loss / "
+                f"{realized_state.get('gain_count', 0)} gain closes"
+                if has_imported
+                else "Upload Console/Groww P&L"
+            ),
+            delta_color="off",
+            help="Cumulative booked from sold trades in your broker P&L export.",
+            border=True,
+        )
+        st.metric(
+            "Booked losses",
+            (
+                pui.format_inr_compact(float(realized_state.get("booked_losses") or 0))
+                if has_imported
+                else "—"
+            ),
+            help="Sum of realised losses only (negative).",
+            border=True,
+        )
+
+    if has_imported and realized_state.get("top_losses"):
         with st.expander("Booked losses (from P&L file)", expanded=False):
             loss_df = pd.DataFrame(realized_state["top_losses"])
-            show_cols = [c for c in ["symbol", "quantity", "buy_value", "sell_value", "realized_pnl", "sell_date"] if c in loss_df.columns]
+            show_cols = [
+                c
+                for c in [
+                    "symbol",
+                    "quantity",
+                    "buy_value",
+                    "sell_value",
+                    "realized_pnl",
+                    "sell_date",
+                ]
+                if c in loss_df.columns
+            ]
             st.dataframe(
                 loss_df[show_cols],
                 hide_index=True,
@@ -679,10 +852,10 @@ def render_decision_snapshot(portfolio_df: pd.DataFrame, summary: dict) -> None:
                 f"{realized_state.get('filename') or '—'} · "
                 f"imported {realized_state.get('imported_at') or '—'}"
             )
-    elif not has_realized:
+    elif not has_imported:
         st.caption(
-            "Selling a loser removes it from holdings, so unrealised P&L can look all green. "
-            "Upload a **Realised P&L** file in the sidebar (Zerodha Console or Groww) to show booked losses."
+            "Older booked losses need a **Realised P&L** file (Zerodha Console or Groww). "
+            "Today's Zerodha sells are already covered under Day P&L above."
         )
 
     # --- Structure ---
@@ -968,12 +1141,13 @@ def render_trends_tab() -> None:
     if history.empty:
         pui.empty_state(
             "No daily history yet",
-            "Trends builds from one snapshot per day. Refreshing the portfolio now saves today automatically.",
+            "Trends builds from one snapshot per day. After 3:30 PM IST, Refresh saves today; "
+            "Groww still finalises its as-of day anytime.",
             icon="photo_camera",
             steps=[
                 "Connect Zerodha (live) and/or upload Groww (T+1 as-of)",
-                "Click **Refresh portfolio** — Zerodha→today, Groww→as-of day + carry",
-                "Repeat each day to grow the chart",
+                "Click **Refresh portfolio** — Groww→as-of day; today waits until after close",
+                "Or use Force-save if you need today's point before 3:30 PM IST",
             ],
         )
         return

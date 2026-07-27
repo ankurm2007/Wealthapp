@@ -174,6 +174,27 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(len(df), 1)
         self.assertEqual(df.iloc[0]["date"].date(), self.yesterday)
 
+    def test_empty_history_before_close_does_not_bootstrap_today(self):
+        """Overnight Cloud wipe + Refresh must not invent a twin 'today' row."""
+        with mock.patch.object(
+            ph,
+            "now_ist",
+            return_value=datetime(2026, 7, 28, 1, 0, tzinfo=IST),
+        ):
+            r = ph.save_summary_snapshot(
+                self._live(),
+                had_zerodha=True,
+                had_groww=True,
+                groww_as_of=self.yesterday,
+                force=False,
+            )
+        self.assertFalse(r["saved"])
+        self.assertEqual(r.get("patched_day"), self.yesterday.isoformat())
+        self.assertIsNone(ph.get_snapshot(self.today))
+        y = ph.get_snapshot(self.yesterday)
+        self.assertIsNotNone(y)
+        self.assertAlmostEqual(y["groww_current"], 6_300_000)
+
 
 if __name__ == "__main__":
     unittest.main()

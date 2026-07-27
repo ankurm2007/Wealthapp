@@ -8,8 +8,8 @@ Design (one row = one calendar day in IST):
    — never a Groww-only half-row.
 3. Today's Groww sleeve is carried from the latest known Groww when no same-day file.
 4. Auto-save for *today* runs after 3:30 PM IST, or when today already has a row
-   (intraday refresh), or on the first-ever snapshot. Overnight refreshes can still
-   finalise yesterday's Groww without inventing a twin "today" row.
+   (intraday refresh), or first-ever bootstrap *after close*, or force. Overnight
+   refreshes can finalise yesterday's Groww without inventing a twin "today" row.
 """
 
 from __future__ import annotations
@@ -226,10 +226,12 @@ def should_autosave_today(*, force: bool = False) -> tuple[bool, str]:
         return True, "forced"
     if get_snapshot(today_ist()) is not None:
         return True, "update-existing"
-    if get_previous_snapshot(today_ist()) is None:
-        return True, "bootstrap-first-day"
     if is_after_market_close():
+        if get_previous_snapshot(today_ist()) is None:
+            return True, "bootstrap-first-day"
         return True, "after-close"
+    # Before close: never invent a brand-new "today" row (avoids overnight twin
+    # days when Cloud history is empty and Groww is written to as-of yesterday).
     return False, "before-close-skip-today"
 
 

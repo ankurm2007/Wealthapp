@@ -193,6 +193,14 @@ def page_header(view: str, summary: Mapping[str, Any] | None = None) -> None:
     has_realized = summary.get("has_realized_pnl")
 
     badges = [tone_badge(ret, f"{format_pct(ret)} unrealised return")]
+    day_move = summary.get("day_book_move")
+    if day_move is not None:
+        badges.append(tone_badge(float(day_move), f"{format_inr_compact(float(day_move))} day move"))
+    today_booked = summary.get("today_booked")
+    if today_booked is not None and abs(float(today_booked)) > 0:
+        badges.append(
+            tone_badge(float(today_booked), f"{format_inr_compact(float(today_booked))} today booked")
+        )
     if has_realized:
         badges.append(tone_badge(realized, f"{format_inr_compact(realized)} booked P&L"))
         if economic is not None:
@@ -203,6 +211,8 @@ def page_header(view: str, summary: Mapping[str, Any] | None = None) -> None:
         ("Total invested", format_inr_compact(invested)),
         ("Unrealised P&L", format_inr_compact(pl)),
     ]
+    if day_move is not None:
+        stats.append(("Day move", format_inr_compact(float(day_move))))
     if has_realized:
         stats.append(("Booked P&L", format_inr_compact(realized)))
 
@@ -271,12 +281,13 @@ def sidebar_block(title: str, *, icon: str = "tune") -> None:
 def sidebar_howto() -> None:
     """Compact how-to at top of sidebar."""
     # Bright deploy marker — if you don't see this string, Cloud is on an old build.
-    st.sidebar.success("DEPLOY OK · groww-asof-v8")
+    st.sidebar.success("DEPLOY OK · day-pnl-v9")
     st.sidebar.markdown("##### How to load your portfolio")
     st.sidebar.caption("1 · Connect Zerodha (live) and/or upload Groww (T+1 as-of)")
-    st.sidebar.caption("2 · Upload Realised P&L so booked losses from sells are visible")
+    st.sidebar.caption("2 · Refresh for Day P&L (today’s sells + vs yesterday snapshot)")
+    st.sidebar.caption("3 · Optional: upload Realised P&L CSV for older booked losses")
     st.sidebar.caption(
-        "3 · Refresh — today's history point auto-saves after 3:30 PM IST"
+        "4 · Today’s history point auto-saves after 3:30 PM IST"
     )
     st.sidebar.space("small")
 
