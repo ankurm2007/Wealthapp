@@ -2,15 +2,13 @@
 headless = true
 fileWatcherType = "poll"
 runOnSave = true
-# Bind IPv4 loopback so Kite's redirect to http://127.0.0.1:8501 always hits this app.
-address = "127.0.0.1"
-port = 8501
+# Do NOT set address/port here — Streamlit Cloud must bind publicly.
+# For local Kite redirect to 127.0.0.1:8501, use ./run.sh (passes --server.address).
 
 [browser]
 gatherUsageStats = false
-# Keep in sync with zerodha.redirect_url in secrets (must match developers.kite.trade).
-serverAddress = "127.0.0.1"
-serverPort = 8501
+# Do NOT hardcode serverAddress to 127.0.0.1 — that breaks Streamlit Cloud deploys.
+# Local: ./run.sh. Cloud: set zerodha.redirect_url in secrets to your *.streamlit.app URL.
 
 # Single light theme only — no [theme.dark], so OS dark mode cannot turn the app black.
 [theme]
