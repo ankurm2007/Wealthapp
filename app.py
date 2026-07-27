@@ -2399,35 +2399,8 @@ def _exchange_zerodha_request_token(api_key: str, api_secret: str, raw_token: st
 
 
 def _zerodha_connect_button(label: str, login_url: str) -> None:
-    """
-    Open Kite login.
-
-    On Streamlit Cloud: same tab (so request_token returns into this session and
-    writable /tmp cache works). Locally: new tab so the app tab stays put.
-    """
-    import app_paths
-
-    if app_paths.is_streamlit_cloud():
-        st.link_button(label, login_url, type="primary", width="stretch")
-        return
-
-    from html import escape
-
-    safe_url = escape(login_url, quote=True)
-    safe_label = escape(label)
-    st.html(
-        f"""
-<a href="{safe_url}" target="_blank" rel="noopener noreferrer"
-   style="
-     display:flex; align-items:center; justify-content:center; gap:0.4rem;
-     width:100%; box-sizing:border-box; margin:0.15rem 0 0.35rem 0;
-     padding:0.65rem 0.9rem; border-radius:10px; text-decoration:none;
-     background:#2563EB; color:#FFFFFF; font-weight:600; font-size:0.95rem;
-   ">
-  <span>{safe_label}</span>
-</a>
-"""
-    )
+    """Open Kite login in this tab (reliable on Streamlit Cloud)."""
+    st.link_button(label, login_url, type="primary", width="stretch")
 
 
 def render_zerodha_sidebar() -> tuple[str, str]:
@@ -2484,16 +2457,11 @@ def render_zerodha_sidebar() -> tuple[str, str]:
     elif connected:
         st.success(zauth.token_status_caption(access_token))
     else:
-        if on_cloud:
-            st.info(
-                "Click **Connect Zerodha** — Kite opens in **this tab**. "
-                "After login you return here and today's token is saved automatically."
-            )
-        else:
-            st.info(
-                "Click **Connect Zerodha** — it opens Kite in a **new tab** so this app "
-                "stays here. After login, come back and click **I finished Kite login**."
-            )
+        st.info(
+            "Click **Connect Zerodha** below. After Kite login you return to this app "
+            "and today's token is saved automatically. "
+            "If that fails, use **Fallback: paste redirect URL**."
+        )
 
     if not cred_error and api_key:
         label = "Reconnect Zerodha" if connected else "Connect Zerodha"
