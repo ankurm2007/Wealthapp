@@ -57,8 +57,8 @@ VIEW_GUIDES = {
     },
     "Trends": {
         "label": "Wealth trends",
-        "caption": "History of total portfolio value and broker mix from the snapshots you save",
-        "do_next": "After refreshing wealth, save a snapshot so this page can track change over time",
+        "caption": "Daily history — Zerodha live for today; Groww T+1 as-of + carry",
+        "do_next": "Refresh the portfolio once a day to keep the trend line growing",
         "icon": "timeline",
     },
 }
@@ -260,9 +260,11 @@ def sidebar_block(title: str, *, icon: str = "tune") -> None:
 def sidebar_howto() -> None:
     """Compact how-to at top of sidebar."""
     st.sidebar.markdown("##### How to load your portfolio")
-    st.sidebar.caption("1 · Connect Zerodha and/or upload a Groww holdings file")
-    st.sidebar.caption("2 · Click **Refresh portfolio** to pull live prices")
-    st.sidebar.caption("3 · Click **Save today's snapshot** to track trends")
+    st.sidebar.caption("1 · Connect Zerodha (live API) and/or upload Groww (file is T+1)")
+    st.sidebar.caption("2 · Set Groww as-of date (usually yesterday), then **Refresh**")
+    st.sidebar.caption(
+        "3 · History: Zerodha→today; Groww→as-of day + carried forward until the next file"
+    )
     st.sidebar.space("small")
 
 

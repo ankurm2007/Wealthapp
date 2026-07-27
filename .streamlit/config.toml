@@ -2,10 +2,15 @@
 headless = true
 fileWatcherType = "poll"
 runOnSave = true
+# Bind IPv4 loopback so Kite's redirect to http://127.0.0.1:8501 always hits this app.
+address = "127.0.0.1"
+port = 8501
 
 [browser]
 gatherUsageStats = false
-serverAddress = "localhost"
+# Keep in sync with zerodha.redirect_url in secrets (must match developers.kite.trade).
+serverAddress = "127.0.0.1"
+serverPort = 8501
 
 # Single light theme only — no [theme.dark], so OS dark mode cannot turn the app black.
 [theme]

@@ -1,3 +1,5 @@
+from datetime import date
+
 import pandas as pd
 import streamlit as st
 from pathlib import Path
@@ -131,10 +133,15 @@ def handle_zerodha_oauth_callback() -> None:
     status = _query_param("status")
     if status and status != "success":
         st.session_state.zerodha_auth_error = (
-            f"Zerodha login failed ({status}). Click Connect Zerodha and try again."
+            f"Zerodha login failed ({status}). You are back in Wealthapp — "
+            "click Connect Zerodha again when ready."
         )
         st.session_state.zerodha_oauth_pending = False
         handled.add(request_token)
+        try:
+            st.query_params.clear()
+        except Exception:
+            pass
         return
 
     api_key = get_secret("zerodha.api_key") or str(
@@ -335,48 +342,68 @@ def enrich_portfolio(portfolio_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_summary(portfolio_df: pd.DataFrame) -> dict:
-    total_invested = portfolio_df["Invested Value"].sum()
-    total_current = portfolio_df["Current Value"].sum()
-    platform_totals = portfolio_df.groupby("Owner")["Current Value"].sum().to_dict()
+    total_invested = float(portfolio_df["Invested Value"].sum())
+    total_current = float(portfolio_df["Current Value"].sum())
+    by_owner_current = portfolio_df.groupby("Owner")["Current Value"].sum().to_dict()
+    by_owner_invested = portfolio_df.groupby("Owner")["Invested Value"].sum().to_dict()
+    by_owner_count = portfolio_df.groupby("Owner").size().to_dict()
+    z_n = int(by_owner_count.get("Zerodha (Kite)", 0))
+    g_n = int(by_owner_count.get("Groww", 0))
     return {
         "total_invested": total_invested,
         "total_current": total_current,
         "pl_amount": total_current - total_invested,
-        "zerodha_current": platform_totals.get("Zerodha (Kite)", 0.0),
-        "groww_current": platform_totals.get("Groww", 0.0),
-        "holding_count": len(portfolio_df),
+        "zerodha_current": float(by_owner_current.get("Zerodha (Kite)", 0.0)),
+        "groww_current": float(by_owner_current.get("Groww", 0.0)),
+        "zerodha_invested": float(by_owner_invested.get("Zerodha (Kite)", 0.0)),
+        "groww_invested": float(by_owner_invested.get("Groww", 0.0)),
+        "zerodha_holdings": z_n,
+        "groww_holdings": g_n,
+        "holding_count": z_n + g_n,
     }
 
 
-def calculate_portfolio(api_key: str, access_token: str, groww_file) -> None:
+def calculate_portfolio(
+    api_key: str,
+    access_token: str,
+    groww_file,
+    *,
+    groww_as_of: date | None = None,
+) -> None:
     holdings = []
+    had_groww = False
+    had_zerodha = False
 
     if groww_file:
         try:
-            holdings.extend(parse_groww_file(groww_file))
-            if holdings:
-                st.sidebar.success("Groww data loaded.")
+            groww_rows = parse_groww_file(groww_file)
+            holdings.extend(groww_rows)
+            had_groww = bool(groww_rows)
+            if had_groww:
+                as_of = groww_as_of or ph.yesterday_ist()
+                st.sidebar.success(
+                    f"Groww file loaded (treated as as-of {as_of.isoformat()})."
+                )
         except Exception as exc:
             st.sidebar.error(f"Error reading the Groww file: {exc}")
 
     if api_key and access_token:
         try:
-            holdings.extend(fetch_zerodha_holdings(api_key, access_token))
-            st.sidebar.success("Zerodha holdings fetched.")
+            z_rows = fetch_zerodha_holdings(api_key, access_token)
+            holdings.extend(z_rows)
+            had_zerodha = bool(z_rows)
+            st.sidebar.success("Zerodha holdings fetched (live).")
             st.session_state.zerodha_auth_error = ""
         except Exception as exc:
             message = str(exc)
-            # Token expiry is shown on the Zerodha card; avoid a duplicate scary banner.
             if "Connect Zerodha" in message:
                 st.session_state.zerodha_auth_error = message
             else:
                 st.sidebar.error(f"Failed to fetch Zerodha data: {exc}")
     elif api_key and not access_token:
-        # API key/secret stay in secrets — only the daily login is missing.
         st.sidebar.info(
             "Zerodha API key is set, but today's login is missing. "
-            "Open the app at your Kite redirect URL, click **Connect Zerodha** "
-            "(same tab), wait for the automatic save, then Refresh."
+            "Connect Zerodha, then Refresh — Groww can still finalise yesterday (T+1)."
         )
     elif access_token and not api_key:
         st.sidebar.warning(
@@ -392,8 +419,25 @@ def calculate_portfolio(api_key: str, access_token: str, groww_file) -> None:
 
     portfolio_df = sym.normalize_portfolio_symbols(enrich_portfolio(pd.DataFrame(holdings)))
     st.session_state.portfolio_df = portfolio_df
-    st.session_state.portfolio_summary = build_summary(portfolio_df)
+    summary = build_summary(portfolio_df)
+    st.session_state.portfolio_summary = summary
     pmd.clear_market_cache()
+
+    # History: live Zerodha for today + Groww T+1 as-of (default yesterday) + carries.
+    try:
+        result = ph.save_summary_snapshot(
+            summary,
+            had_zerodha=had_zerodha,
+            had_groww=had_groww,
+            groww_as_of=groww_as_of or (ph.yesterday_ist() if had_groww else None),
+        )
+        st.session_state.last_auto_snapshot = result
+        if result["saved"]:
+            st.sidebar.success(result["reason"])
+        else:
+            st.sidebar.warning(result["reason"])
+    except Exception as exc:
+        st.sidebar.warning(f"Portfolio loaded, but daily snapshot failed: {exc}")
 
 
 def wealth_trend_series(column: str = "total_current", points: int = 12) -> list[float] | None:
@@ -805,21 +849,41 @@ def render_trends_tab() -> None:
     history = ph.load_snapshots()
     if history.empty:
         pui.empty_state(
-            "No snapshots saved yet",
-            "This page charts portfolio value over time from the snapshots you save.",
+            "No daily history yet",
+            "Trends builds from one snapshot per day. Refreshing the portfolio now saves today automatically.",
             icon="photo_camera",
             steps=[
-                "Refresh your portfolio from the sidebar",
-                "Click **Save today's snapshot**",
-                "Repeat weekly to build a clear trend line",
+                "Connect Zerodha (live) and/or upload Groww (T+1 as-of)",
+                "Click **Refresh portfolio** — Zerodha→today, Groww→as-of day + carry",
+                "Repeat each day to grow the chart",
             ],
         )
         return
 
     colors = pui.chart_colors()
+    status = ph.history_status(lookback_days=30)
+    if not status["today_saved"]:
+        pui.status_banner(
+            "Today is not in history yet — connect Zerodha and refresh "
+            "(Groww can finalise yesterday when the file arrives). Best after 3:30 PM IST.",
+            kind="info",
+        )
+    elif status["missing_recent"] > 0:
+        pui.status_banner(
+            f"History has {status['count']} day(s). "
+            f"{status['missing_recent']} day(s) missing in the last month — "
+            "refresh on days you can; quality checks protect against partial loads.",
+            kind="warning",
+        )
+    else:
+        st.caption(
+            "Daily points are saved only when a refresh looks complete "
+            f"(not a partial broker load). {status['count']} day(s) so far."
+        )
+
     monthly = ph.get_monthly_summary(history)
     last_saved = history["date"].max().date()
-    days_since = (pd.Timestamp.today().normalize() - pd.Timestamp(last_saved)).days
+    days_since = (pd.Timestamp(ph.today_ist()) - pd.Timestamp(last_saved)).days
     latest_value = float(history["total_current"].iloc[-1])
     first_value = float(history["total_current"].iloc[0])
     since_start = (latest_value - first_value) / first_value * 100 if first_value else 0
@@ -927,6 +991,8 @@ def render_trends_tab() -> None:
                 "pl_amount": st.column_config.NumberColumn("P&L", format="₹%d"),
                 "zerodha_current": st.column_config.NumberColumn("Zerodha", format="₹%d"),
                 "groww_current": st.column_config.NumberColumn("Groww", format="₹%d"),
+                "zerodha_invested": None,
+                "groww_invested": None,
                 "holding_count": st.column_config.NumberColumn("Holdings"),
                 "created_at": None,
             },
@@ -2238,12 +2304,13 @@ def _exchange_zerodha_request_token(api_key: str, api_secret: str, raw_token: st
         st.session_state.zerodha_auth_error = str(exc)
 
 
-def _zerodha_same_tab_connect_button(label: str, login_url: str) -> None:
+def _zerodha_connect_button(label: str, login_url: str) -> None:
     """
-    Same-tab navigation to Kite.
+    Open Kite in a *new* tab so this Wealthapp tab always stays open.
 
-    st.link_button always opens a *new* tab, so the Kite redirect lands in a
-    different Streamlit session and this app never sees request_token in the URL.
+    After login, Kite redirects the new tab back here with request_token; that
+    tab saves today's token to disk. Return to this tab and click
+    "I finished Kite login — check again".
     """
     from html import escape
 
@@ -2251,7 +2318,7 @@ def _zerodha_same_tab_connect_button(label: str, login_url: str) -> None:
     safe_label = escape(label)
     st.html(
         f"""
-<a href="{safe_url}" target="_self" rel="noopener noreferrer"
+<a href="{safe_url}" target="_blank" rel="noopener noreferrer"
    style="
      display:flex; align-items:center; justify-content:center; gap:0.4rem;
      width:100%; box-sizing:border-box; margin:0.15rem 0 0.35rem 0;
@@ -2316,23 +2383,24 @@ def render_zerodha_sidebar() -> tuple[str, str]:
         st.success(zauth.token_status_caption(access_token))
     else:
         st.info(
-            "Click **Connect Zerodha** — stay in the same tab. After Kite login, "
-            "this app reads the redirect URL and saves today's token automatically."
+            "Click **Connect Zerodha** — it opens Kite in a **new tab** so this app "
+            "stays here. After login, come back and click **I finished Kite login**."
         )
 
     if not cred_error and api_key:
         label = "Reconnect Zerodha" if connected else "Connect Zerodha"
-        _zerodha_same_tab_connect_button(label, zauth.login_url(api_key))
+        _zerodha_connect_button(label, zauth.login_url(api_key))
         st.caption(
-            f"Uses same-tab redirect to `{kite_redirect}` "
-            "(must match developers.kite.trade). Open the app at that exact address."
+            f"Kite must redirect to `{kite_redirect}` "
+            "(same URL in developers.kite.trade). Keep this tab open."
         )
 
     if not connected and not cred_error and api_key:
         if st.button(
             "I finished Kite login — check again",
             width="stretch",
-            help="If login opened in another tab, click here to pick up the saved token.",
+            type="primary",
+            help="After the Kite tab redirects back, click here to load today's token.",
         ):
             cached = zauth.load_cached_token()
             if cached:
@@ -2344,14 +2412,14 @@ def render_zerodha_sidebar() -> tuple[str, str]:
                 st.rerun()
             else:
                 st.session_state.zerodha_auth_error = (
-                    "No login saved yet. Use Connect Zerodha in the same tab "
-                    f"(browser should return to {kite_redirect}), or paste the URL below."
+                    "No login saved yet. Finish Kite in the other tab until you see this "
+                    f"app again at {kite_redirect}, or paste that tab's URL below."
                 )
 
         with st.expander("Fallback: paste redirect URL"):
             st.caption(
-                "Only needed if automatic redirect did not return to this app. "
-                f"URL looks like `{kite_redirect}/?request_token=...&status=success`."
+                "If the Kite tab shows a long URL with request_token=, copy-paste it here. "
+                f"Example: `{kite_redirect}/?request_token=...&status=success`."
             )
             with st.form("zerodha_token_form", clear_on_submit=False):
                 request_token = st.text_input("Redirect URL or request_token")
@@ -2361,7 +2429,7 @@ def render_zerodha_sidebar() -> tuple[str, str]:
                 )
             if submitted:
                 if not request_token.strip():
-                    st.error("Paste the redirect URL from the address bar.")
+                    st.error("Paste the redirect URL from the Kite tab address bar.")
                 else:
                     _exchange_zerodha_request_token(
                         api_key, effective_secret, request_token
@@ -2404,44 +2472,64 @@ with st.sidebar.container(border=True):
     api_key, access_token = render_zerodha_sidebar()
 
 with st.sidebar.container(border=True):
-    st.markdown("**1 · Groww (holdings file)**")
+    st.markdown("**2 · Groww (holdings file, T+1)**")
+    st.caption(
+        "Groww reports land a day late. On refresh, the file is applied to the "
+        "**as-of** date below (default: yesterday), and that sleeve is carried into today "
+        "until a newer file arrives."
+    )
     groww_file = st.file_uploader(
         "Upload Groww holdings CSV or Excel",
         type=["csv", "xlsx"],
         label_visibility="collapsed",
     )
+    groww_as_of = st.date_input(
+        "Groww file as-of date",
+        value=ph.yesterday_ist(),
+        max_value=ph.today_ist(),
+        help="Usually yesterday — the day the Groww report reflects.",
+    )
 
 st.sidebar.space("small")
-st.sidebar.markdown("**2 · Update prices**")
+st.sidebar.markdown("**3 · Update prices + daily history**")
+st.sidebar.caption(
+    "Zerodha is live for today; Groww uses the as-of date (T+1). "
+    "Missing sleeves are carried from the prior snapshot. Best after 3:30 PM IST."
+)
 if st.sidebar.button(
     "Refresh portfolio",
     type="primary",
     width="stretch",
     icon=":material/refresh:",
 ):
-    calculate_portfolio(api_key, access_token, groww_file)
+    calculate_portfolio(api_key, access_token, groww_file, groww_as_of=groww_as_of)
 
-st.sidebar.markdown("**3 · Save for trends**")
-if st.sidebar.button("Save today's snapshot", width="stretch", icon=":material/photo_camera:"):
-    if st.session_state.portfolio_summary is None:
-        st.sidebar.warning("Refresh the portfolio first.")
-    else:
-        summary = st.session_state.portfolio_summary
-        saved_date = ph.save_snapshot(
-            total_invested=summary["total_invested"],
-            total_current=summary["total_current"],
-            pl_amount=summary["pl_amount"],
-            zerodha_current=summary["zerodha_current"],
-            groww_current=summary["groww_current"],
-            holding_count=summary["holding_count"],
-        )
-        st.sidebar.success(f"Snapshot saved for {saved_date}.")
+hist = ph.history_status(lookback_days=14)
+if hist["today_saved"]:
+    st.sidebar.success(hist["caption"])
+else:
+    st.sidebar.info(hist["caption"])
 
-last_snapshot = ph.get_last_snapshot_date()
-if last_snapshot:
-    st.sidebar.caption(f"Last snapshot saved · {last_snapshot.strftime('%d %b %Y')}")
-elif st.session_state.portfolio_summary is not None:
-    st.sidebar.caption("No snapshot saved yet — save one to unlock Trends.")
+with st.sidebar.expander("Manual snapshot"):
+    st.caption(
+        "Force-save bypasses quality checks — use only if you know this refresh is correct."
+    )
+    if st.button("Force-save today's snapshot", width="stretch", icon=":material/photo_camera:"):
+        if st.session_state.portfolio_summary is None:
+            st.warning("Refresh the portfolio first.")
+        else:
+            summary = st.session_state.portfolio_summary
+            result = ph.save_summary_snapshot(
+                summary,
+                force=True,
+                had_zerodha=float(summary.get("zerodha_current") or 0) > 0,
+                had_groww=float(summary.get("groww_current") or 0) > 0,
+                groww_as_of=groww_as_of,
+            )
+            if result["saved"]:
+                st.success(result["reason"])
+            else:
+                st.warning(result["reason"])
 
 # --- Main navigation ---
 NAV_ICONS = {
