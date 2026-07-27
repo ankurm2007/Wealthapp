@@ -12,10 +12,15 @@ from zoneinfo import ZoneInfo
 from kiteconnect import KiteConnect
 from kiteconnect.exceptions import KiteException, TokenException
 
+import app_paths
+
 # Must match the redirect URL registered at https://developers.kite.trade
 DEFAULT_REDIRECT_URL = "http://127.0.0.1:8501"
 IST = ZoneInfo("Asia/Kolkata")
-TOKEN_CACHE_PATH = Path(__file__).resolve().parent / "data" / "zerodha_token.json"
+
+
+def token_cache_path() -> Path:
+    return app_paths.data_file("zerodha_token.json")
 
 
 def normalize_request_token(raw: str) -> str:
@@ -73,10 +78,11 @@ def token_cache_valid(saved_at: datetime, now: datetime | None = None) -> bool:
 
 
 def load_cached_token() -> str:
-    if not TOKEN_CACHE_PATH.exists():
+    path = token_cache_path()
+    if not path.exists():
         return ""
     try:
-        payload = json.loads(TOKEN_CACHE_PATH.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8"))
         token = str(payload.get("access_token", "")).strip()
         saved_raw = payload.get("saved_at", "")
         if not token or not saved_raw:
@@ -96,18 +102,20 @@ def save_cached_token(access_token: str) -> None:
     token = (access_token or "").strip()
     if not token:
         return
-    TOKEN_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    path = token_cache_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "access_token": token,
         "saved_at": datetime.now(IST).isoformat(),
     }
-    TOKEN_CACHE_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def clear_cached_token() -> None:
     try:
-        if TOKEN_CACHE_PATH.exists():
-            TOKEN_CACHE_PATH.unlink()
+        path = token_cache_path()
+        if path.exists():
+            path.unlink()
     except OSError:
         pass
 

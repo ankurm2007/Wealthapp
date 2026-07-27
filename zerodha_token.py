@@ -64,7 +64,7 @@ def main() -> int:
         return 1
 
     print(access_token)
-    print(f"\nToken cached at {zauth.TOKEN_CACHE_PATH} until the next 6:00 AM IST reset.")
+    print(f"\nToken cached at {zauth.token_cache_path()} until the next 6:00 AM IST reset.")
     print("The app sidebar will pick it up automatically on refresh.")
     return 0
 

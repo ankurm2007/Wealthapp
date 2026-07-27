@@ -277,7 +277,7 @@ def sidebar_howto() -> None:
         "3 · Refresh — today's history point auto-saves after 3:30 PM IST"
     )
     # Visible deploy marker so we can confirm Streamlit Cloud picked up GitHub.
-    st.sidebar.caption("Build · booked-pnl-v2")
+    st.sidebar.caption("Build · cloud-connect-v3")
     st.sidebar.space("small")
 
 

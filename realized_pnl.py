@@ -17,8 +17,10 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+import app_paths
+
 IST = ZoneInfo("Asia/Kolkata")
-STORE_PATH = Path(__file__).parent / "data" / "realized_pnl.json"
+STORE_PATH = app_paths.data_file("realized_pnl.json")
 
 # Column name aliases → canonical fields
 _SYMBOL_ALIASES = ("symbol", "tradingsymbol", "trading symbol", "stock name", "scrip", "ticker", "company")

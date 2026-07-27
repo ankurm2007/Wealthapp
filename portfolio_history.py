@@ -21,7 +21,9 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-DB_PATH = Path(__file__).parent / "data" / "portfolio_history.db"
+import app_paths
+
+DB_PATH = app_paths.data_file("portfolio_history.db")
 IST = ZoneInfo("Asia/Kolkata")
 
 MARKET_CLOSE_IST = time(15, 30)
