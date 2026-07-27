@@ -101,14 +101,6 @@ if "zerodha_auth_success" not in st.session_state:
 
 if not st.session_state.zerodha_api_secret:
     st.session_state.zerodha_api_secret = get_secret("zerodha.api_secret")
-# Keep session token in sync with today's cache. After 6:00 AM IST the cache is
-# cleared — also drop any leftover session token so Refresh does not keep sending
-# yesterday's access token to Kite (which surfaces as "token expired").
-_cached_zerodha_token = zauth.load_cached_token()
-if _cached_zerodha_token:
-    st.session_state.zerodha_access_token = _cached_zerodha_token
-elif st.session_state.zerodha_access_token:
-    st.session_state.zerodha_access_token = ""
 
 
 def _query_param(name: str) -> str:
@@ -130,22 +122,48 @@ def _query_param(name: str) -> str:
     return str(value).strip()
 
 
+# Keep session token in sync with today's cache. After 6:00 AM IST the cache is
+# cleared — also drop any leftover session token so Refresh does not keep sending
+# yesterday's access token to Kite (which surfaces as "token expired").
+# Never wipe the session while a Kite redirect is still in the URL.
+_cached_zerodha_token = zauth.load_cached_token()
+_oauth_token_in_url = bool(_query_param("request_token"))
+if _cached_zerodha_token:
+    st.session_state.zerodha_access_token = _cached_zerodha_token
+elif st.session_state.zerodha_access_token and not _oauth_token_in_url:
+    st.session_state.zerodha_access_token = ""
+
+
 def handle_zerodha_oauth_callback() -> None:
     """
     Auto-read request_token from the browser URL after Kite redirects back.
-    Works when Connect opens in the *same tab* so the redirect lands on this app.
+    Claim the token immediately so Streamlit's double-run cannot burn it twice.
     """
     request_token = zauth.normalize_request_token(_query_param("request_token"))
     if not request_token:
         return
 
-    # Visible while the exchange runs (before rerun clears the URL).
     st.session_state.zerodha_oauth_pending = True
-
     handled = st.session_state.setdefault("zerodha_handled_request_tokens", set())
     if request_token in handled:
+        # Already claimed this run-cycle (or earlier). Prefer cached/session token.
         st.session_state.zerodha_oauth_pending = False
+        cached = zauth.load_cached_token()
+        if cached:
+            st.session_state.zerodha_access_token = cached
+            st.session_state.zerodha_auth_error = ""
+            if not st.session_state.get("zerodha_auth_success"):
+                st.session_state.zerodha_auth_success = (
+                    "Zerodha connected. Click Refresh portfolio."
+                )
+        try:
+            st.query_params.clear()
+        except Exception:
+            pass
         return
+
+    # Claim BEFORE calling Kite — request_token is one-time use.
+    handled.add(request_token)
 
     status = _query_param("status")
     if status and status != "success":
@@ -154,7 +172,6 @@ def handle_zerodha_oauth_callback() -> None:
             "click Connect Zerodha again when ready."
         )
         st.session_state.zerodha_oauth_pending = False
-        handled.add(request_token)
         try:
             st.query_params.clear()
         except Exception:
@@ -184,7 +201,6 @@ def handle_zerodha_oauth_callback() -> None:
         )
         st.session_state.zerodha_auth_error = ""
         st.session_state.zerodha_oauth_pending = False
-        handled.add(request_token)
         try:
             st.query_params.clear()
         except Exception:
@@ -192,9 +208,22 @@ def handle_zerodha_oauth_callback() -> None:
         st.rerun()
     except Exception as exc:
         st.session_state.zerodha_oauth_pending = False
+        # If a twin rerun already saved the token, don't scare the user.
+        cached = zauth.load_cached_token() or st.session_state.get("zerodha_access_token")
+        if cached and zauth.has_active_token(str(cached)):
+            st.session_state.zerodha_access_token = str(cached)
+            st.session_state.zerodha_auth_error = ""
+            st.session_state.zerodha_auth_success = (
+                "Zerodha connected. Click Refresh portfolio."
+            )
+            try:
+                st.query_params.clear()
+            except Exception:
+                pass
+            return
         st.session_state.zerodha_auth_error = (
             f"Got the redirect URL, but token exchange failed: {exc}. "
-            "Click Connect Zerodha again (same tab), or use the fallback paste box."
+            "Click Connect Zerodha again, or paste the redirect URL in Fallback below."
         )
 
 
@@ -2399,8 +2428,9 @@ def _exchange_zerodha_request_token(api_key: str, api_secret: str, raw_token: st
 
 
 def _zerodha_connect_button(label: str, login_url: str) -> None:
-    """Open Kite login in this tab (reliable on Streamlit Cloud)."""
+    """Open Kite login — button + plain link (Cloud sometimes drops one of them)."""
     st.link_button(label, login_url, type="primary", width="stretch")
+    st.markdown(f"[Open Kite login in this tab]({login_url})")
 
 
 def render_zerodha_sidebar() -> tuple[str, str]:
@@ -2420,7 +2450,6 @@ def render_zerodha_sidebar() -> tuple[str, str]:
         st.session_state.zerodha_api_key = default_api_key
 
     if secrets_ready:
-        # Permanent credentials stay in secrets — never re-ask on daily token refresh.
         api_key = default_api_key.strip()
         effective_secret = default_api_secret.strip()
         st.caption("API key & secret loaded from app secrets.")
@@ -2458,9 +2487,8 @@ def render_zerodha_sidebar() -> tuple[str, str]:
         st.success(zauth.token_status_caption(access_token))
     else:
         st.info(
-            "Click **Connect Zerodha** below. After Kite login you return to this app "
-            "and today's token is saved automatically. "
-            "If that fails, use **Fallback: paste redirect URL**."
+            "1) Click **Connect Zerodha**  2) Finish Kite login  "
+            "3) You return here automatically. If not connected, use Fallback below."
         )
 
     if not cred_error and api_key:
@@ -2479,45 +2507,59 @@ def render_zerodha_sidebar() -> tuple[str, str]:
             )
 
     if not connected and not cred_error and api_key:
-        if not on_cloud:
-            if st.button(
-                "I finished Kite login — check again",
-                width="stretch",
-                type="primary",
-                help="After the Kite tab redirects back, click here to load today's token.",
-            ):
-                cached = zauth.load_cached_token()
-                if cached:
-                    st.session_state.zerodha_access_token = cached
-                    st.session_state.zerodha_auth_success = (
-                        "Found today's login. Click Refresh portfolio."
-                    )
-                    st.session_state.zerodha_auth_error = ""
-                    st.rerun()
-                else:
-                    st.session_state.zerodha_auth_error = (
-                        "No login saved yet. Finish Kite in the other tab until you see this "
-                        f"app again at {kite_redirect}, or paste that tab's URL below."
-                    )
+        if st.button(
+            "I finished Kite login — load token",
+            width="stretch",
+            type="secondary",
+            help="Loads today's token from cache after Kite redirects back.",
+        ):
+            cached = zauth.load_cached_token()
+            if cached:
+                st.session_state.zerodha_access_token = cached
+                st.session_state.zerodha_auth_success = (
+                    "Found today's login. Click Refresh portfolio."
+                )
+                st.session_state.zerodha_auth_error = ""
+                st.rerun()
+            else:
+                st.session_state.zerodha_auth_error = (
+                    "No login saved yet. After Kite, your browser URL should look like "
+                    f"`{kite_redirect}/?request_token=...&status=success`. "
+                    "Paste that full URL in Fallback below."
+                )
 
-        with st.expander("Fallback: paste redirect URL"):
+        with st.expander("Fallback: paste redirect URL", expanded=True):
             st.caption(
-                "If the address bar has request_token=, copy-paste the full URL here. "
-                f"Example: `{kite_redirect}/?request_token=...&status=success`."
+                "Copy the full address-bar URL after Kite login (must include request_token=) "
+                f"and paste it here. Example: `{kite_redirect}/?request_token=...&status=success`."
             )
             with st.form("zerodha_token_form", clear_on_submit=False):
                 request_token = st.text_input("Redirect URL or request_token")
                 submitted = st.form_submit_button(
                     "Save today's access token",
                     width="stretch",
+                    type="primary",
                 )
             if submitted:
                 if not request_token.strip():
-                    st.error("Paste the redirect URL from the Kite tab address bar.")
+                    st.error("Paste the redirect URL from the address bar.")
                 else:
                     _exchange_zerodha_request_token(
                         api_key, effective_secret, request_token
                     )
+
+        with st.expander("Connection diagnostics"):
+            st.write(
+                {
+                    "cloud_runtime": on_cloud,
+                    "api_key_present": bool(api_key),
+                    "api_secret_present": bool(effective_secret),
+                    "redirect_url": kite_redirect,
+                    "token_cache_writable_path": str(zauth.token_cache_path()),
+                    "cached_token_today": bool(zauth.load_cached_token()),
+                    "session_connected": connected,
+                }
+            )
 
     if connected:
         with st.expander("Zerodha session"):
