@@ -178,17 +178,11 @@ def is_access_token_error(exc: Exception) -> bool:
 
 def access_token_error_message(exc: Exception | None = None) -> str:
     expiry = next_expiry_ist()
-    base = (
-        "Zerodha access token expired. Kite resets tokens every day at 6:00 AM IST. "
-        f"Next expiry: {expiry.strftime('%d %b %Y, %I:%M %p IST')}. "
-        "Click Connect Zerodha in the sidebar for a fresh login."
+    return (
+        "Yesterday's Zerodha login has expired (Kite resets at 6:00 AM IST daily). "
+        f"Click **Connect Zerodha** in the sidebar, finish login, then **Refresh portfolio**. "
+        f"New session lasts until {expiry.strftime('%d %b, %I:%M %p IST')}."
     )
-    if exc is None:
-        return base
-    detail = str(exc).strip()
-    if detail and not is_access_token_error(exc):
-        return f"{base} ({detail})"
-    return base
 
 
 def token_error_message(exc: Exception) -> str:
