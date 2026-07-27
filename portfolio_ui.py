@@ -57,7 +57,7 @@ VIEW_GUIDES = {
     },
     "Trends": {
         "label": "Wealth trends",
-        "caption": "Daily history — Zerodha live for today; Groww T+1 as-of + carry",
+        "caption": "Daily history — one point per day after close; Groww finalises T+1 as-of",
         "do_next": "Refresh the portfolio once a day to keep the trend line growing",
         "icon": "timeline",
     },
@@ -188,6 +188,23 @@ def page_header(view: str, summary: Mapping[str, Any] | None = None) -> None:
     pl = float(summary.get("pl_amount") or 0)
     ret = (pl / invested * 100) if invested else 0.0
     n = int(summary.get("holding_count") or 0)
+    realized = float(summary.get("realized_total") or 0)
+    economic = summary.get("economic_pl")
+    has_realized = summary.get("has_realized_pnl")
+
+    badges = [tone_badge(ret, f"{format_pct(ret)} unrealised return")]
+    if has_realized:
+        badges.append(tone_badge(realized, f"{format_inr_compact(realized)} booked P&L"))
+        if economic is not None:
+            badges.append(tone_badge(float(economic), f"{format_inr_compact(float(economic))} economic"))
+    badges.append(f":gray-badge[{n} holdings]")
+
+    stats = [
+        ("Total invested", format_inr_compact(invested)),
+        ("Unrealised P&L", format_inr_compact(pl)),
+    ]
+    if has_realized:
+        stats.append(("Booked P&L", format_inr_compact(realized)))
 
     hero(
         info["label"],
@@ -195,14 +212,8 @@ def page_header(view: str, summary: Mapping[str, Any] | None = None) -> None:
         icon=info["icon"],
         headline=format_inr(current),
         headline_label="Total portfolio value",
-        badges=[
-            tone_badge(ret, f"{format_pct(ret)} unrealised return"),
-            f":gray-badge[{n} holdings]",
-        ],
-        stats=[
-            ("Total invested", format_inr_compact(invested)),
-            ("Unrealised P&L", format_inr_compact(pl)),
-        ],
+        badges=badges,
+        stats=stats,
         do_next=info.get("do_next"),
     )
 
@@ -260,10 +271,10 @@ def sidebar_block(title: str, *, icon: str = "tune") -> None:
 def sidebar_howto() -> None:
     """Compact how-to at top of sidebar."""
     st.sidebar.markdown("##### How to load your portfolio")
-    st.sidebar.caption("1 · Connect Zerodha (live API) and/or upload Groww (file is T+1)")
-    st.sidebar.caption("2 · Set Groww as-of date (usually yesterday), then **Refresh**")
+    st.sidebar.caption("1 · Connect Zerodha (live) and/or upload Groww (T+1 as-of)")
+    st.sidebar.caption("2 · Upload Realised P&L so booked losses from sells are visible")
     st.sidebar.caption(
-        "3 · History: Zerodha→today; Groww→as-of day + carried forward until the next file"
+        "3 · Refresh — today's history point auto-saves after 3:30 PM IST"
     )
     st.sidebar.space("small")
 

@@ -21,6 +21,7 @@ import portfolio_research as presearch
 import portfolio_risk as prisk
 import portfolio_terminal as pterm
 import portfolio_ui as pui
+import realized_pnl as rpnl
 import screener_import as screener
 import stock_analyzer as san
 import symbol_resolver as sym
@@ -61,6 +62,22 @@ if "institutional_df" not in st.session_state:
     st.session_state.institutional_df = None
 if "transcript_audit" not in st.session_state:
     st.session_state.transcript_audit = None
+if "realized_pnl" not in st.session_state:
+    st.session_state.realized_pnl = rpnl.load_realized_state()
+
+
+def _summary_for_header(summary: dict | None) -> dict | None:
+    if not summary:
+        return summary
+    out = dict(summary)
+    realized_state = st.session_state.get("realized_pnl") or {}
+    if realized_state.get("row_count") or realized_state.get("realized_total"):
+        economic = rpnl.combine_economic_pnl(float(out.get("pl_amount") or 0), realized_state)
+        out["has_realized_pnl"] = True
+        out["realized_total"] = economic["realized"]
+        out["booked_losses"] = economic["booked_losses"]
+        out["economic_pl"] = economic["economic"]
+    return out
 
 
 def get_secret(path: str, default: str = "") -> str:
@@ -434,6 +451,8 @@ def calculate_portfolio(
         st.session_state.last_auto_snapshot = result
         if result["saved"]:
             st.sidebar.success(result["reason"])
+        elif result.get("skipped_today"):
+            st.sidebar.info(result["reason"])
         else:
             st.sidebar.warning(result["reason"])
     except Exception as exc:
@@ -535,6 +554,8 @@ def render_decision_snapshot(portfolio_df: pd.DataFrame, summary: dict) -> None:
 
     # --- Capital ---
     st.markdown("**Capital position**")
+    realized_state = st.session_state.get("realized_pnl") or rpnl.empty_realized_state()
+    economic = rpnl.combine_economic_pnl(pl, realized_state)
     with st.container(horizontal=True):
         st.metric(
             "Total invested",
@@ -554,7 +575,7 @@ def render_decision_snapshot(portfolio_df: pd.DataFrame, summary: dict) -> None:
             "Unrealised P&L",
             pui.format_inr_compact(pl),
             pui.format_pct(ret),
-            help="Current value minus invested capital",
+            help="Open holdings only (Current − Invested). Sold positions are not included.",
             border=True,
             chart_data=pl_trend,
             chart_type="bar",
@@ -565,6 +586,69 @@ def render_decision_snapshot(portfolio_df: pd.DataFrame, summary: dict) -> None:
             f"{len(portfolio_df['Owner'].unique())} brokers",
             delta_color="off",
             border=True,
+        )
+
+    # Booked (realised) P&L — without this, sells vanish and the book looks too green.
+    st.markdown("**Booked + economic P&L**")
+    has_realized = bool(realized_state.get("row_count") or realized_state.get("realized_total"))
+    with st.container(horizontal=True):
+        st.metric(
+            "Booked (realised) P&L",
+            pui.format_inr_compact(economic["realized"]) if has_realized else "—",
+            (
+                f"{realized_state.get('loss_count', 0)} loss / "
+                f"{realized_state.get('gain_count', 0)} gain closes"
+                if has_realized
+                else "Upload Console/Groww P&L"
+            ),
+            delta_color="off",
+            help="From sold trades in your broker P&L export — includes booked losses.",
+            border=True,
+        )
+        st.metric(
+            "Booked losses",
+            pui.format_inr_compact(economic["booked_losses"]) if has_realized else "—",
+            help="Sum of realised losses only (negative).",
+            border=True,
+        )
+        st.metric(
+            "Economic P&L",
+            pui.format_inr_compact(economic["economic"]) if has_realized else pui.format_inr_compact(pl),
+            (
+                "Unrealised + booked"
+                if has_realized
+                else "Unrealised only until P&L file is loaded"
+            ),
+            delta_color="off",
+            help="Unrealised on open book plus realised P&L from sells.",
+            border=True,
+        )
+
+    if has_realized and realized_state.get("top_losses"):
+        with st.expander("Booked losses (from P&L file)", expanded=False):
+            loss_df = pd.DataFrame(realized_state["top_losses"])
+            show_cols = [c for c in ["symbol", "quantity", "buy_value", "sell_value", "realized_pnl", "sell_date"] if c in loss_df.columns]
+            st.dataframe(
+                loss_df[show_cols],
+                hide_index=True,
+                column_config={
+                    "symbol": "Symbol",
+                    "quantity": st.column_config.NumberColumn("Qty", format="%.0f"),
+                    "buy_value": st.column_config.NumberColumn("Buy value", format="₹%d"),
+                    "sell_value": st.column_config.NumberColumn("Sell value", format="₹%d"),
+                    "realized_pnl": st.column_config.NumberColumn("Booked P&L", format="₹%d"),
+                    "sell_date": "Sell date",
+                },
+            )
+            st.caption(
+                f"Source: {realized_state.get('source') or 'P&L file'} · "
+                f"{realized_state.get('filename') or '—'} · "
+                f"imported {realized_state.get('imported_at') or '—'}"
+            )
+    elif not has_realized:
+        st.caption(
+            "Selling a loser removes it from holdings, so unrealised P&L can look all green. "
+            "Upload a **Realised P&L** file in the sidebar (Zerodha Console or Groww) to show booked losses."
         )
 
     # --- Structure ---
@@ -863,22 +947,30 @@ def render_trends_tab() -> None:
     colors = pui.chart_colors()
     status = ph.history_status(lookback_days=30)
     if not status["today_saved"]:
-        pui.status_banner(
-            "Today is not in history yet — connect Zerodha and refresh "
-            "(Groww can finalise yesterday when the file arrives). Best after 3:30 PM IST.",
-            kind="info",
-        )
+        if status["after_close"]:
+            pui.status_banner(
+                "Today is not in history yet — Refresh after market close to save today's point. "
+                "A Groww upload still finalises its as-of day even before that.",
+                kind="info",
+            )
+        else:
+            pui.status_banner(
+                "Before 3:30 PM IST, Refresh updates live holdings and can finalise Groww "
+                "on its as-of day, but today's history point waits until after close "
+                "(or use Force-save).",
+                kind="info",
+            )
     elif status["missing_recent"] > 0:
         pui.status_banner(
             f"History has {status['count']} day(s). "
             f"{status['missing_recent']} day(s) missing in the last month — "
-            "refresh on days you can; quality checks protect against partial loads.",
+            "one Refresh after close per day keeps Trends honest.",
             kind="warning",
         )
     else:
         st.caption(
-            "Daily points are saved only when a refresh looks complete "
-            f"(not a partial broker load). {status['count']} day(s) so far."
+            "Each row is one IST calendar day. Zerodha is live for that day; "
+            f"Groww is T+1 (finalised when the file arrives). {status['count']} day(s) so far."
         )
 
     monthly = ph.get_monthly_summary(history)
@@ -978,7 +1070,7 @@ def render_trends_tab() -> None:
         with st.container(border=True):
             st.area_chart(platform_df, color=[colors["groww"], colors["zerodha"]])
 
-    pui.section("Snapshot history", "Every saved portfolio snapshot, newest first")
+    pui.section("Snapshot history", "One row per day — sleeves shown separately")
     display_history = history.sort_values("date", ascending=False).copy()
     with st.container(border=True):
         st.dataframe(
@@ -993,6 +1085,8 @@ def render_trends_tab() -> None:
                 "groww_current": st.column_config.NumberColumn("Groww", format="₹%d"),
                 "zerodha_invested": None,
                 "groww_invested": None,
+                "zerodha_holdings": st.column_config.NumberColumn("Z holdings"),
+                "groww_holdings": st.column_config.NumberColumn("G holdings"),
                 "holding_count": st.column_config.NumberColumn("Holdings"),
                 "created_at": None,
             },
@@ -2490,11 +2584,50 @@ with st.sidebar.container(border=True):
         help="Usually yesterday — the day the Groww report reflects.",
     )
 
+with st.sidebar.container(border=True):
+    st.markdown("**3 · Booked P&L (sells / realised)**")
+    st.caption(
+        "Holdings ignore sold stocks. Upload Zerodha Console → Reports → P&L "
+        "(choose **Realised**) or Groww Tax/P&L CSV so booked losses show in the report."
+    )
+    realized_file = st.file_uploader(
+        "Upload realised P&L CSV or Excel",
+        type=["csv", "xlsx"],
+        key="realized_pnl_upload",
+        label_visibility="collapsed",
+    )
+    if realized_file is not None:
+        try:
+            parsed = rpnl.parse_realized_report(
+                realized_file,
+                filename=getattr(realized_file, "name", "") or "",
+                source="Broker P&L upload",
+            )
+            rpnl.save_realized_state(parsed)
+            st.session_state.realized_pnl = parsed
+            st.sidebar.success(
+                f"Booked P&L loaded: {pui.format_inr_compact(parsed['realized_total'])} "
+                f"({parsed['loss_count']} losses, {parsed['gain_count']} gains)."
+            )
+        except Exception as exc:
+            st.sidebar.error(f"Could not read realised P&L file: {exc}")
+
+    current_realized = st.session_state.get("realized_pnl") or {}
+    if current_realized.get("row_count"):
+        st.caption(
+            f"Loaded · realised {pui.format_inr_compact(current_realized.get('realized_total', 0))} · "
+            f"booked losses {pui.format_inr_compact(current_realized.get('booked_losses', 0))}"
+        )
+        if st.button("Clear booked P&L", width="stretch"):
+            rpnl.clear_realized_state()
+            st.session_state.realized_pnl = rpnl.empty_realized_state()
+            st.rerun()
+
 st.sidebar.space("small")
-st.sidebar.markdown("**3 · Update prices + daily history**")
+st.sidebar.markdown("**4 · Update prices + daily history**")
 st.sidebar.caption(
-    "Zerodha is live for today; Groww uses the as-of date (T+1). "
-    "Missing sleeves are carried from the prior snapshot. Best after 3:30 PM IST."
+    "Zerodha → today's sleeve (live). Groww file → as-of day only (T+1), then carried forward. "
+    "Today's history point auto-saves after 3:30 PM IST (Force-save anytime)."
 )
 if st.sidebar.button(
     "Refresh portfolio",
@@ -2512,7 +2645,8 @@ else:
 
 with st.sidebar.expander("Manual snapshot"):
     st.caption(
-        "Force-save bypasses quality checks — use only if you know this refresh is correct."
+        "Force-save writes today's point even before market close. "
+        "Use after you have Zerodha connected (Groww optional / T+1)."
     )
     if st.button("Force-save today's snapshot", width="stretch", icon=":material/photo_camera:"):
         if st.session_state.portfolio_summary is None:
@@ -2549,7 +2683,7 @@ main_view = st.segmented_control(
 )
 main_view = main_view or "Portfolio"
 
-pui.page_header(main_view, st.session_state.portfolio_summary)
+pui.page_header(main_view, _summary_for_header(st.session_state.portfolio_summary))
 st.space("small")
 
 if main_view == "Portfolio":
