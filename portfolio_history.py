@@ -3,8 +3,9 @@
 Design (one row = one calendar day in IST):
 
 1. Zerodha sleeve updates from the live API on *today* only.
-2. Groww files are T+1: an upload with as-of date D updates Groww on day D only
-   (D must already exist — we never invent past days).
+2. Groww files are T+1: an upload with as-of date D updates Groww on day D.
+   If D is missing (e.g. Cloud /tmp wipe), D is created using live Zerodha carry-back
+   — never a Groww-only half-row.
 3. Today's Groww sleeve is carried from the latest known Groww when no same-day file.
 4. Auto-save for *today* runs after 3:30 PM IST, or when today already has a row
    (intraday refresh), or on the first-ever snapshot. Overnight refreshes can still
@@ -238,17 +239,24 @@ def apply_groww_to_as_of_day(
     groww_current: float,
     groww_invested: float,
     groww_holdings: int,
+    live_zerodha: Mapping[str, Any] | None = None,
 ) -> str | None:
-    """Update Groww sleeve on an existing day. Never creates a new calendar day."""
-    existing = get_snapshot(as_of)
-    if existing is None:
-        return None
+    """
+    Write Groww onto as-of day.
 
+    - If the day exists: keep its Zerodha sleeve, replace Groww.
+    - If the day is missing: create it using live Zerodha as carry-back (needed after
+      Cloud /tmp history wipes). Refuses Groww-only half-rows with no Zerodha.
+    """
+    existing = get_snapshot(as_of)
     z_cur, z_inv, z_n = _sleeve(existing, "zerodha")
-    if z_cur <= 0 and float(existing.get("total_current") or 0) <= 0:
-        # Day exists but is empty — still allow Groww-only finalisation only if
-        # Zerodha was never part of this book; otherwise refuse half-rows without Z.
-        pass
+    if z_cur <= 0 and live_zerodha:
+        z_cur = float(live_zerodha.get("zerodha_current") or 0)
+        z_inv = float(live_zerodha.get("zerodha_invested") or 0)
+        z_n = int(live_zerodha.get("zerodha_holdings") or 0)
+
+    if z_cur <= 0:
+        return None
 
     packed = _pack(
         z_cur=z_cur,
@@ -532,22 +540,29 @@ def save_summary_snapshot(
 
     live_g_cur = float(summary.get("groww_current") or 0)
     if had_groww and live_g_cur > 0 and groww_as_of < day:
+        live_z = {
+            "zerodha_current": summary.get("zerodha_current"),
+            "zerodha_invested": summary.get("zerodha_invested"),
+            "zerodha_holdings": summary.get("zerodha_holdings"),
+        }
+        existed = get_snapshot(groww_as_of) is not None
         patched_day = apply_groww_to_as_of_day(
             as_of=groww_as_of,
             groww_current=live_g_cur,
             groww_invested=float(summary.get("groww_invested") or 0),
             groww_holdings=int(summary.get("groww_holdings") or 0),
+            live_zerodha=live_z if had_zerodha else None,
         )
         if patched_day:
+            action = "updated" if existed else "created"
             notes.append(
-                f"Groww finalised on {patched_day} "
-                f"(Zerodha sleeve on that day kept as recorded)."
+                f"Groww {action} on {patched_day} "
+                f"(Zerodha sleeve kept/carried; T+1 as-of)."
             )
         else:
             notes.append(
-                f"Groww as-of {groww_as_of.isoformat()} not in history — "
-                "past days are never invented. Upload after that day exists, "
-                "or set as-of to today."
+                f"Groww as-of {groww_as_of.isoformat()} not written — need Zerodha "
+                "connected so that day can be created/updated with both sleeves."
             )
 
     composed = compose_today_summary(

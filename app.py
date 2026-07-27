@@ -478,7 +478,12 @@ def calculate_portfolio(
             groww_as_of=groww_as_of or (ph.yesterday_ist() if had_groww else None),
         )
         st.session_state.last_auto_snapshot = result
-        if result["saved"]:
+        if result.get("patched_day") and not result["saved"]:
+            st.sidebar.success(
+                f"Groww history updated for {result['patched_day']}. "
+                f"{result.get('reason') or ''}".strip()
+            )
+        elif result["saved"]:
             st.sidebar.success(result["reason"])
         elif result.get("skipped_today"):
             st.sidebar.info(result["reason"])
@@ -2603,9 +2608,9 @@ with st.sidebar.container(border=True):
 with st.sidebar.container(border=True):
     st.markdown("**2 · Groww (holdings file, T+1)**")
     st.caption(
-        "Groww reports land a day late. On refresh, the file is applied to the "
-        "**as-of** date below (default: yesterday), and that sleeve is carried into today "
-        "until a newer file arrives."
+        "Groww reports land a day late. Set as-of to the report date (e.g. 27 Jul), "
+        "connect Zerodha, then Refresh — history for that day is created/updated. "
+        "Cloud history resets on reboot until you refresh again."
     )
     groww_file = st.file_uploader(
         "Upload Groww holdings CSV or Excel",

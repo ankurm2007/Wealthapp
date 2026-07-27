@@ -55,29 +55,32 @@ class HistoryTests(unittest.TestCase):
         base["pl_amount"] = base["total_current"] - base["total_invested"]
         return base
 
-    def test_never_invents_missing_as_of_day(self):
-        # Only today bootstrap with Zerodha — Groww as-of yesterday missing.
+    def test_creates_as_of_day_with_live_zerodha_carry(self):
+        # Empty history + Groww as-of yesterday + live Zerodha → create yesterday.
         r = ph.save_summary_snapshot(
-            self._live(groww_current=0, groww_invested=0, groww_holdings=0),
-            had_zerodha=True,
-            had_groww=False,
-            force=True,
-        )
-        self.assertTrue(r["saved"])
-        self.assertIsNone(ph.get_snapshot(self.yesterday))
-
-        r2 = ph.save_summary_snapshot(
             self._live(),
             had_zerodha=True,
             had_groww=True,
             groww_as_of=self.yesterday,
             force=True,
         )
-        self.assertIsNone(r2.get("patched_day"))
+        self.assertEqual(r.get("patched_day"), self.yesterday.isoformat())
+        y = ph.get_snapshot(self.yesterday)
+        self.assertIsNotNone(y)
+        self.assertAlmostEqual(y["zerodha_current"], 1_750_000)
+        self.assertAlmostEqual(y["groww_current"], 6_300_000)
+        self.assertEqual(y["holding_count"], 29)
+
+    def test_groww_without_zerodha_does_not_invent_half_row(self):
+        r = ph.save_summary_snapshot(
+            self._live(zerodha_current=0, zerodha_invested=0, zerodha_holdings=0),
+            had_zerodha=False,
+            had_groww=True,
+            groww_as_of=self.yesterday,
+            force=True,
+        )
+        self.assertIsNone(r.get("patched_day"))
         self.assertIsNone(ph.get_snapshot(self.yesterday))
-        today = ph.get_snapshot(self.today)
-        # Groww held back because yesterday not in history.
-        self.assertEqual(today["groww_current"], 0.0)
 
     def test_groww_finalises_existing_yesterday_without_touching_zerodha(self):
         ph.save_snapshot(
